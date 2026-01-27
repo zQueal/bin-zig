@@ -52,6 +52,7 @@ pub fn main(init: std.process.Init) !void {
         var alias: ?[]const u8 = null;
         var interactive = false;
         var provider: ?install_cmd.Provider = null;
+        var install_path: ?[]const u8 = null;
 
         while (args_iter.next()) |arg| {
             if (std.mem.eql(u8, arg, "--as")) {
@@ -73,6 +74,8 @@ pub fn main(init: std.process.Init) !void {
                 };
             } else if (url == null) {
                 url = arg;
+            } else if (install_path == null) {
+                install_path = arg;
             }
         }
 
@@ -81,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
 
-        try install_cmd.install(allocator, &conf, url.?, init.minimal.environ, init.io, .{ .alias = alias, .interactive = interactive, .provider = provider });
+        try install_cmd.install(allocator, &conf, url.?, init.minimal.environ, init.io, .{ .alias = alias, .interactive = interactive, .provider = provider, .install_path = install_path });
     } else if (std.mem.eql(u8, command, "update")) {
         var target: ?[]const u8 = null;
         var all_flag = false;
@@ -142,6 +145,7 @@ fn printHelp() void {
         \\Commands:
         \\  install <url>    Install from GitHub, GitLab, or Codeberg
         \\                   URL formats: https://, domain (github.com/), or short (user/repo)
+        \\                   Arguments: [path] custom install directory (must exist, must be writable)
         \\                   Flags: --as <name> to rename binary
         \\                          -a, --all-assets to interactively select assets
         \\                          --provider <type> for explicit provider (github/gitlab/codeberg)

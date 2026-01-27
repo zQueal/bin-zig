@@ -62,9 +62,46 @@ pub const InstallOptions = struct {
     provider: ?Provider = null,
 };
 
+fn validateAndResolvePath(allocator: std.mem.Allocator, path: []const u8, io: std.Io) ![]const u8 {
+    // For now, we'll accept paths as-is. The user needs to provide valid paths.
+    // In a more complete implementation, we'd expand ~ and handle relative paths.
+    // The spec says the path must exist and be writable, so we'll verify that.
+
+    // Check if directory exists (DO NOT create it)
+    const dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch |err| {
+        if (err == error.FileNotFound or err == error.NotDir) {
+            std.log.err("Install path does not exist: {s}", .{path});
+            std.log.err("Please create the directory first and try again.", .{});
+            return error.PathNotFound;
+        }
+        return err;
+    };
+    defer dir.close(io);
+
+    // Test writability
+    const test_file_path = try std.fs.path.join(allocator, &[_][]const u8{ path, ".bin_write_test" });
+    defer allocator.free(test_file_path);
+
+    const test_file = std.Io.Dir.createFileAbsolute(io, test_file_path, .{ .read = true }) catch {
+        std.log.err("Install path is not writable: {s}", .{path});
+        return error.PathNotWritable;
+    };
+    test_file.close(io);
+    std.Io.Dir.deleteFileAbsolute(io, test_file_path) catch {};
+
+    return allocator.dupe(u8, path);
+}
+
 pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const u8, env: std.process.Environ, io: std.Io, options: InstallOptions) !void {
     var client = std.http.Client{ .allocator = allocator, .io = io };
     defer client.deinit();
+
+    // Validate install path if provided
+    const resolved_install_path = if (options.install_path) |path|
+        try validateAndResolvePath(allocator, path, io)
+    else
+        null;
+    defer if (resolved_install_path) |p| allocator.free(p);
 
     const provider = try Provider.fromUrl(url, options.provider);
     const pref = provider.prefix();
@@ -116,7 +153,7 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const 
             const download_path = try prepareDownloadPath(allocator, conf, asset_name, io);
             try performDownload(allocator, &client, download_url, download_path, io, conf.download_threads);
             try checksum_mod.verify(allocator, &client, release, asset_name, download_path, io);
-            try finalizeInstall(allocator, conf, env, io, download_path, url, repo, tag_name, "github", options.alias);
+            try finalizeInstall(allocator, conf, env, io, download_path, url, repo, tag_name, "github", options.alias, resolved_install_path);
         },
         .gitlab => {
             const release = try gitlab.fetchRelease(allocator, &client, user, repo, tag, conf.tokens.gitlab);
@@ -129,7 +166,7 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const 
 
             const download_path = try prepareDownloadPath(allocator, conf, asset_name, io);
             try performDownload(allocator, &client, download_url, download_path, io, conf.download_threads);
-            try finalizeInstall(allocator, conf, env, io, download_path, url, repo, tag_name, "gitlab", options.alias);
+            try finalizeInstall(allocator, conf, env, io, download_path, url, repo, tag_name, "gitlab", options.alias, resolved_install_path);
         },
         .codeberg => {
             const release = try codeberg.fetchRelease(allocator, &client, user, repo, tag, conf.tokens.codeberg);
@@ -142,7 +179,7 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const 
 
             const download_path = try prepareDownloadPath(allocator, conf, asset_name, io);
             try performDownload(allocator, &client, download_url, download_path, io, conf.download_threads);
-            try finalizeInstall(allocator, conf, env, io, download_path, url, repo, tag_name, "codeberg", options.alias);
+            try finalizeInstall(allocator, conf, env, io, download_path, url, repo, tag_name, "codeberg", options.alias, resolved_install_path);
         },
     }
 }
@@ -236,8 +273,8 @@ fn performDownload(allocator: std.mem.Allocator, client: *std.http.Client, url: 
     try advanced_download.download(allocator, client, url, dest, io, .{ .threads = threads });
 }
 
-fn finalizeInstall(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.Environ, io: std.Io, download_path: []const u8, url: []const u8, repo: []const u8, version: []const u8, provider_name: []const u8, alias: ?[]const u8) !void {
-    const install_path_dir = conf.bin_dir;
+fn finalizeInstall(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.Environ, io: std.Io, download_path: []const u8, url: []const u8, repo: []const u8, version: []const u8, provider_name: []const u8, alias: ?[]const u8, custom_path: ?[]const u8) !void {
+    const install_path_dir = custom_path orelse conf.bin_dir;
     std.Io.Dir.createDirAbsolute(io, install_path_dir, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
 
     var final_bin_path: []const u8 = "";

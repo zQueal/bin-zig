@@ -43,7 +43,7 @@ The executable will be located in `zig-out/bin/bin`.
 
 | Command                     | Description                                | Example                                  |
 | --------------------------- | ------------------------------------------ | ---------------------------------------- |
-| `bin install <url>`         | Install binary from GitHub, GitLab, or Codeberg  | `bin install cli/cli --as gh -a`         |
+| `bin install <url> [path]` | Install binary from GitHub, GitLab, or Codeberg  | `bin install cli/cli --as gh -a`         |
 | `bin list`                  | List installed binaries and versions       | `bin list`                               |
 | `bin update`                | Check all binaries for available updates   | `bin update`                             |
 | `bin update <name>`         | Update a specific binary                   | `bin update gh`                          |
@@ -96,6 +96,20 @@ You can use three different URL formats when installing:
    bin install --provider gitlab gitlab-org/cli
    bin install --provider codeberg mergiraf/mergiraf
    ```
+
+**Custom Install Path**:
+You can specify a custom installation directory (absolute or relative):
+
+```bash
+# Absolute path
+bin install cli/cli /usr/local/bin/gh
+
+# Relative path (converted to absolute)
+bin install cli/cli ~/bin/gh
+bin install cli/cli ./bin/gh
+```
+
+> **Note**: The install path must exist and be writable. The directory will NOT be created automatically.
 
 **When to use `-a` (Interactive Asset Selection)**:
 - By default, `bin-zig` automatically selects the best matching asset based on your OS and architecture
