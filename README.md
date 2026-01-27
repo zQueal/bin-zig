@@ -45,7 +45,6 @@ The executable will be located in `zig-out/bin/bin`.
 | --------------------------- | ------------------------------------------ | ---------------------------------------- |
 | `bin install <url> [path]` | Install binary from GitHub, GitLab, or Codeberg  | `bin install cli/cli --as gh -a`         |
 | `bin list`                  | List installed binaries and versions       | `bin list`                               |
-| `bin update`                | Check all binaries for available updates   | `bin update`                             |
 | `bin update <name...>`      | Update specific binaries                   | `bin update gh kubectl`                 |
 | `bin update --all`          | Update all managed binaries                | `bin update --all`                       |
 | `bin remove <name...>`      | Remove managed binaries (works with .exe)  | `bin remove gh kubectl fzf`              |
@@ -55,6 +54,7 @@ The executable will be located in `zig-out/bin/bin`.
 | `bin info`                  | Show API rate limit information            | `bin info`                               |
 | `bin prune`                 | Remove dead entries from configuration     | `bin prune`                              |
 | `bin clean`                 | Clear download/extraction cache            | `bin clean`                              |
+| `bin help [command]`       | Show help for any command                     | `bin help install`                          |
 
 **Tip**: You can install specific versions using the `@` syntax: `bin install github.com/cli/cli@v2.40.1`.
 

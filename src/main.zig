@@ -152,6 +152,14 @@ pub fn main(init: std.process.Init) !void {
         try clean_cmd.clean(allocator, &conf, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "info")) {
         try info_cmd.info(allocator, &conf, init.minimal.environ, init.io);
+    } else if (std.mem.eql(u8, command, "help")) {
+        const subcommand = args_iter.next();
+        if (subcommand == null) {
+            printHelp();
+            return;
+        }
+        printCommandHelp(subcommand.?);
+        return;
     } else if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
         printHelp();
     } else if (std.mem.eql(u8, command, "-v") or std.mem.eql(u8, command, "--version")) {
@@ -183,10 +191,154 @@ fn printHelp() void {
         \\  prune            Remove dead entries from configuration
         \\  clean            Clear download/extraction cache
         \\  info             Show API rate limit information
+        \\  help [command]   Show help for specific command
         \\
         \\Global Flags:
         \\  -h, --help       Display this help and exit
         \\  -v, --version    Output version information and exit
         \\
     , .{});
+}
+
+fn printCommandHelp(command: []const u8) void {
+    if (std.mem.eql(u8, command, "install")) {
+        std.debug.print(
+            \\bin install <url> [path] - Install binary from GitHub, GitLab, or Codeberg
+            \\
+            \\Arguments:
+            \\  url       Repository URL or user/repo
+            \\            Supported formats:
+            \\              - Full URL: https://github.com/cli/cli
+            \\              - Domain: github.com/cli/cli
+            \\              - Short: cli/cli (defaults to GitHub)
+            \\  path      Optional custom install directory (absolute or relative)
+            \\            Path must exist and be writable.
+            \\
+            \\Flags:
+            \\  --as <name>         Install with custom alias instead of repo name
+            \\  -a, --all-assets    Interactive mode to manually select from assets
+            \\  --provider <type>    Explicit provider: github, gitlab, or codeberg
+            \\
+            \\Examples:
+            \\  bin install cli/cli
+            \\  bin install gitlab.com/gitlab-org/cli --as glab
+            \\  bin install cli/cli ~/bin/gh
+            \\  bin install cli/cli --as gh -a
+            \\  bin install --provider gitlab gitlab-org/cli
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, command, "update")) {
+        std.debug.print(
+            \\bin update [name...] - Update installed binaries
+            \\
+            \\Arguments:
+            \\  name      One or more binary names to update (optional)
+            \\
+            \\Flags:
+            \\  --all     Update all managed binaries
+            \\
+            \\Examples:
+            \\  bin update           Check all binaries for updates
+            \\  bin update gh        Update specific binary
+            \\  bin update gh kubectl Update multiple binaries
+            \\  bin update --all     Update all binaries
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, command, "list")) {
+        std.debug.print(
+            \\bin list - List installed binaries and versions
+            \\
+            \\Displays all managed binaries with their version, path, and provider.
+            \\
+            \\Example output:
+            \\  gh (version: v2.40.0, path: /home/user/.local/bin/gh, provider: github)
+            \\  kubectl (version: v1.29.0, path: /home/user/.local/bin/kubectl, provider: github)
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, command, "remove")) {
+        std.debug.print(
+            \\bin remove <name...> - Remove one or more installed binaries
+            \\
+            \\Arguments:
+            \\  name      One or more binary names to remove
+            \\
+            \\Examples:
+            \\  bin remove gh
+            \\  bin remove gh kubectl fzf
+            \\  bin remove gh.exe  (also works without .exe)
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, command, "ensure")) {
+        std.debug.print(
+            \\bin ensure - Verify and reinstall missing binaries
+            \\
+            \\Checks all managed binaries and reinstalls any that are missing from disk.
+            \\Useful for restoration after system maintenance or cleanup.
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, command, "pin")) {
+        std.debug.print(
+            \\bin pin <name...> - Lock binary to current version
+            \\
+            \\Arguments:
+            \\  name      One or more binary names to pin
+            \\
+            \\Pinned binaries will not be updated by 'bin update --all'.
+            \\
+            \\Examples:
+            \\  bin pin terraform
+            \\  bin pin terraform kubectl
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, command, "unpin")) {
+        std.debug.print(
+            \\bin unpin <name...> - Unlock binary for updates
+            \\
+            \\Arguments:
+            \\  name      One or more binary names to unpin
+            \\
+            \\Examples:
+            \\  bin unpin terraform
+            \\  bin unpin terraform kubectl
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, command, "prune")) {
+        std.debug.print(
+            \\bin prune - Remove dead entries from configuration
+            \\
+            \\Removes entries for binaries that no longer exist on disk
+            \\from the managed binaries list.
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, command, "clean")) {
+        std.debug.print(
+            \\bin clean - Clear download/extraction cache
+            \\
+            \\Removes all cached downloaded files from the cache directory.
+            \\Does not affect installed binaries.
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, command, "info")) {
+        std.debug.print(
+            \\bin info - Show API rate limit information
+            \\
+            \\Displays current API rate limit status for GitHub, GitLab, and Codeberg.
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, command, "help")) {
+        std.debug.print(
+            \\bin help [command] - Display help information
+            \\
+            \\Arguments:
+            \\  command   Optional command to show detailed help for
+            \\
+            \\Examples:
+            \\  bin help           Show general help
+            \\  bin help install   Show detailed install command help
+            \\
+        , .{});
+    } else {
+        std.log.err("Unknown command: {s}", .{command});
+        std.debug.print("\nRun 'bin help' to see all available commands.\n", .{});
+    }
 }
