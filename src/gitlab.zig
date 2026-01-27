@@ -25,20 +25,20 @@ const GitLabRelease = struct {
 pub fn fetchRelease(allocator: std.mem.Allocator, client: *std.http.Client, user: []const u8, repo: []const u8, tag: []const u8, token: []const u8) !Release {
     const project_id = try std.fmt.allocPrint(allocator, "{s}%2F{s}", .{ user, repo });
     defer allocator.free(project_id);
-    
+
     const tag_val = if (tag.len == 0) "permalink/latest" else tag;
     const api_url = try std.fmt.allocPrint(allocator, "https://gitlab.com/api/v4/projects/{s}/releases/{s}", .{ project_id, tag_val });
     defer allocator.free(api_url);
 
     const uri = try std.Uri.parse(api_url);
-    
+
     var extra_headers_list: std.ArrayList(std.http.Header) = .empty;
     defer extra_headers_list.deinit(allocator);
 
     if (token.len > 0) {
         try extra_headers_list.append(allocator, .{ .name = "PRIVATE-TOKEN", .value = token });
     }
-    
+
     var req = try client.request(.GET, uri, .{
         .extra_headers = extra_headers_list.items,
         .headers = .{
@@ -53,7 +53,7 @@ pub fn fetchRelease(allocator: std.mem.Allocator, client: *std.http.Client, user
 
     var transfer_buffer: [8192]u8 = undefined;
     var reader = resp.reader(&transfer_buffer);
-    const body = try reader.allocRemaining(allocator, .limited(1024 * 1024));
+    const body = try reader.allocRemaining(allocator, .limited(10 * 1024 * 1024));
     defer allocator.free(body);
 
     const parsed = try std.json.parseFromSlice(GitLabRelease, allocator, body, .{ .ignore_unknown_fields = true });
@@ -110,12 +110,12 @@ pub fn selectBestAsset(allocator: std.mem.Allocator, release: Release) !?Asset {
                 score += @intCast(extensions.len - i);
                 break;
             } else if (ext.len == 0) {
-                 if (std.mem.lastIndexOfScalar(u8, name, '.') == null) {
-                     score += 5;
-                 }
+                if (std.mem.lastIndexOfScalar(u8, name, '.') == null) {
+                    score += 5;
+                }
             }
         }
-        
+
         asset.score = score;
         if (score > highest_score) {
             highest_score = score;

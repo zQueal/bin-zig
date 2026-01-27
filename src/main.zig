@@ -32,6 +32,9 @@ pub fn main(init: std.process.Init) !void {
     var conf = try config.load(allocator, init.minimal.environ, init.io);
     defer conf.deinit();
 
+    // Validate config
+    try config.validate(&conf, init.io);
+
     const builtin = @import("builtin");
     if (conf.bin_dir.len == 0) {
         if (builtin.os.tag == .windows) {

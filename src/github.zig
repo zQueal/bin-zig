@@ -20,7 +20,7 @@ pub fn fetchRelease(allocator: std.mem.Allocator, client: *std.http.Client, user
     defer allocator.free(url);
 
     const uri = try std.Uri.parse(url);
-    
+
     var extra_headers_list: std.ArrayList(std.http.Header) = .empty;
     defer extra_headers_list.deinit(allocator);
 
@@ -28,7 +28,7 @@ pub fn fetchRelease(allocator: std.mem.Allocator, client: *std.http.Client, user
         try extra_headers_list.append(allocator, .{ .name = "Authorization", .value = try std.fmt.allocPrint(allocator, "token {s}", .{token}) });
     }
     try extra_headers_list.append(allocator, .{ .name = "Accept", .value = "application/vnd.github.v3+json" });
-    
+
     var req = try client.request(.GET, uri, .{
         .extra_headers = extra_headers_list.items,
         .headers = .{
@@ -44,27 +44,27 @@ pub fn fetchRelease(allocator: std.mem.Allocator, client: *std.http.Client, user
         std.log.err("GitHub API request failed with status {d}", .{@intFromEnum(response.head.status)});
         return error.RequestFailed;
     }
-    
+
     // Read body
-    const body_size = 1024 * 1024; // 1MB limit for response
+    const body_size = 10 * 1024 * 1024; // 10MB limit for response
     var transfer_buffer: [8192]u8 = undefined;
     var reader = response.reader(&transfer_buffer);
     const body = try reader.allocRemaining(allocator, .limited(body_size));
     // defer allocator.free(body); // We rely on caller to manage memory of returned struct, simpler to arena everything.
     // Actually we should probably use an arena for the whole operation.
-    
+
     // Parse JSON
     // We only need assets and tag_name
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
     // defer parsed.deinit(); // Caller needs the strings
-    
+
     const root = parsed.value;
     var release = Release{ .tag_name = "", .assets = &[_]Asset{} };
-    
+
     if (root.object.get("tag_name")) |t| {
         if (t == .string) release.tag_name = try allocator.dupe(u8, t.string);
     }
-    
+
     if (root.object.get("assets")) |a| {
         if (a == .array) {
             var assets = std.ArrayList(Asset).empty;
@@ -72,9 +72,13 @@ pub fn fetchRelease(allocator: std.mem.Allocator, client: *std.http.Client, user
                 if (item == .object) {
                     var name: []const u8 = "";
                     var durl: []const u8 = "";
-                    if (item.object.get("name")) |n| if (n == .string) { name = n.string; };
-                    if (item.object.get("browser_download_url")) |u| if (u == .string) { durl = u.string; };
-                    
+                    if (item.object.get("name")) |n| if (n == .string) {
+                        name = n.string;
+                    };
+                    if (item.object.get("browser_download_url")) |u| if (u == .string) {
+                        durl = u.string;
+                    };
+
                     if (name.len > 0 and durl.len > 0) {
                         try assets.append(allocator, Asset{
                             .name = try allocator.dupe(u8, name),
@@ -86,7 +90,7 @@ pub fn fetchRelease(allocator: std.mem.Allocator, client: *std.http.Client, user
             release.assets = try assets.toOwnedSlice(allocator);
         }
     }
-    
+
     return release;
 }
 
@@ -94,16 +98,15 @@ pub fn selectBestAsset(allocator: std.mem.Allocator, release: Release) !?Asset {
     const os_keywords = utils.getOsKeywords();
     const arch_keywords = utils.getArchKeywords();
     const extensions = utils.getExtensions();
-    
-    var best_asset: ?Asset = null
-;
+
+    var best_asset: ?Asset = null;
     var best_score: i32 = -1;
-    
+
     for (release.assets) |*asset| {
         var score: i32 = 0;
         const name_lower = try std.ascii.allocLowerString(allocator, asset.name);
         defer allocator.free(name_lower);
-        
+
         // OS Detection
         var os_match = false;
         for (os_keywords) |kw| {
@@ -113,7 +116,7 @@ pub fn selectBestAsset(allocator: std.mem.Allocator, release: Release) !?Asset {
                 break;
             }
         }
-        
+
         // Arch Detection
         var arch_match = false;
         for (arch_keywords) |kw| {
@@ -123,7 +126,7 @@ pub fn selectBestAsset(allocator: std.mem.Allocator, release: Release) !?Asset {
                 break;
             }
         }
-        
+
         // Extension weight
         var ext_match = false;
         for (extensions) |ext| {
@@ -134,27 +137,27 @@ pub fn selectBestAsset(allocator: std.mem.Allocator, release: Release) !?Asset {
                 break;
             }
         }
-        
+
         // Penalties
         if (std.mem.indexOf(u8, name_lower, "sha256") != null) score -= 100;
         if (std.mem.indexOf(u8, name_lower, ".asc") != null) score -= 100;
         if (std.mem.indexOf(u8, name_lower, ".sig") != null) score -= 100;
-        
+
         asset.score = score;
-        
+
         if (score > best_score) {
             best_score = score;
             best_asset = asset.*;
         }
     }
-    
+
     // Sort assets by score descending
     std.mem.sort(Asset, release.assets, {}, struct {
         fn lessThan(_: void, a: Asset, b: Asset) bool {
             return a.score > b.score;
         }
     }.lessThan);
-    
+
     if (best_score <= 0) return null;
     return best_asset;
 }

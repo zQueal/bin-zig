@@ -62,15 +62,31 @@ pub const InstallOptions = struct {
     provider: ?Provider = null,
 };
 
-fn validateAndResolvePath(allocator: std.mem.Allocator, path: []const u8, io: std.Io) ![]const u8 {
-    // For now, we'll accept paths as-is. The user needs to provide valid paths.
-    // In a more complete implementation, we'd expand ~ and handle relative paths.
-    // The spec says the path must exist and be writable, so we'll verify that.
+fn validateAndResolvePath(allocator: std.mem.Allocator, path: []const u8, env: std.process.Environ, io: std.Io) ![]const u8 {
+    var resolved_path = path;
+
+    // Expand ~ to home directory
+    if (std.mem.startsWith(u8, path, "~/")) {
+        const home = env.getAlloc(allocator, "HOME") catch b: {
+            if (@import("builtin").os.tag == .windows) {
+                break :b try env.getAlloc(allocator, "USERPROFILE");
+            }
+            return error.HomeNotFound;
+        };
+        defer allocator.free(home);
+        resolved_path = try std.fs.path.join(allocator, &[_][]const u8{ home, path[2..] });
+    }
+
+    // Convert relative to absolute
+    const cwd = try std.process.getCwdAlloc(allocator);
+    defer allocator.free(cwd);
+    const abs_path = try std.fs.path.resolve(allocator, &[_][]const u8{ cwd, resolved_path });
+    errdefer allocator.free(abs_path);
 
     // Check if directory exists (DO NOT create it)
-    const dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch |err| {
+    const dir = std.Io.Dir.openDirAbsolute(io, abs_path, .{}) catch |err| {
         if (err == error.FileNotFound or err == error.NotDir) {
-            std.log.err("Install path does not exist: {s}", .{path});
+            std.log.err("Install path does not exist: {s}", .{abs_path});
             std.log.err("Please create the directory first and try again.", .{});
             return error.PathNotFound;
         }
@@ -79,17 +95,17 @@ fn validateAndResolvePath(allocator: std.mem.Allocator, path: []const u8, io: st
     defer dir.close(io);
 
     // Test writability
-    const test_file_path = try std.fs.path.join(allocator, &[_][]const u8{ path, ".bin_write_test" });
+    const test_file_path = try std.fs.path.join(allocator, &[_][]const u8{ abs_path, ".bin_write_test" });
     defer allocator.free(test_file_path);
 
     const test_file = std.Io.Dir.createFileAbsolute(io, test_file_path, .{ .read = true }) catch {
-        std.log.err("Install path is not writable: {s}", .{path});
+        std.log.err("Install path is not writable: {s}", .{abs_path});
         return error.PathNotWritable;
     };
     test_file.close(io);
     std.Io.Dir.deleteFileAbsolute(io, test_file_path) catch {};
 
-    return allocator.dupe(u8, path);
+    return abs_path;
 }
 
 pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const u8, env: std.process.Environ, io: std.Io, options: InstallOptions) !void {
@@ -98,7 +114,7 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const 
 
     // Validate install path if provided
     const resolved_install_path = if (options.install_path) |path|
-        try validateAndResolvePath(allocator, path, io)
+        try validateAndResolvePath(allocator, path, env, io)
     else
         null;
     defer if (resolved_install_path) |p| allocator.free(p);

@@ -22,7 +22,7 @@ pub const Config = struct {
 
     pub fn init(allocator: std.mem.Allocator) Config {
         return Config{
-            .bin_dir = "", 
+            .bin_dir = "",
             .download_threads = 4,
             .bins = std.StringHashMap(Binary).init(allocator),
             .arena = std.heap.ArenaAllocator.init(allocator),
@@ -33,7 +33,7 @@ pub const Config = struct {
         self.bins.deinit();
         self.arena.deinit();
     }
-    
+
     // Helper to get or create BIN_CONFIG path
     pub fn getConfigPath(allocator: std.mem.Allocator, env: std.process.Environ, io: std.Io) ![]const u8 {
         if (env.getAlloc(allocator, "BIN_CONFIG")) |path| {
@@ -48,10 +48,10 @@ pub const Config = struct {
             return error.HomeNotFound;
         };
         defer allocator.free(home);
-        
+
         const config_dir = try std.fs.path.join(allocator, &[_][]const u8{ home, ".config" });
         std.Io.Dir.createDirAbsolute(io, config_dir, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
-        
+
         return std.fs.path.join(allocator, &[_][]const u8{ config_dir, "bin.yml" });
     }
 };
@@ -59,21 +59,21 @@ pub const Config = struct {
 pub fn load(parent_allocator: std.mem.Allocator, env: std.process.Environ, io: std.Io) !Config {
     var config = Config.init(parent_allocator);
     const allocator = config.arena.allocator();
-    
+
     const path = try Config.getConfigPath(allocator, env, io);
-    
+
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return config,
         else => return err,
     };
     defer file.close(io);
-    
+
     const file_size = (try file.stat(io)).size;
     if (file_size == 0) return config;
 
     const buffer = try allocator.alloc(u8, file_size);
     _ = try file.readPositionalAll(io, buffer, 0);
-    
+
     var it = std.mem.splitScalar(u8, buffer, '\n');
     var current_section: enum { root, tokens, bins, binary } = .root;
     var current_bin_name: []const u8 = "";
@@ -105,7 +105,7 @@ pub fn load(parent_allocator: std.mem.Allocator, env: std.process.Environ, io: s
             if (current_bin_name.len > 0) {
                 try config.bins.put(current_bin_name, current_bin);
             }
-            current_bin_name = try allocator.dupe(u8, trimmed[0..trimmed.len-1]);
+            current_bin_name = try allocator.dupe(u8, trimmed[0 .. trimmed.len - 1]);
             current_bin = Binary{ .path = "", .remote_name = current_bin_name, .version = "", .url = "", .provider = "" };
             current_section = .binary;
         } else if (current_section == .binary and indent >= 4 and std.mem.indexOf(u8, trimmed, ":") != null) {
@@ -122,24 +122,24 @@ pub fn load(parent_allocator: std.mem.Allocator, env: std.process.Environ, io: s
             if (current_bin_name.len > 0) {
                 try config.bins.put(current_bin_name, current_bin);
             }
-            current_bin_name = try allocator.dupe(u8, trimmed[0..trimmed.len-1]);
+            current_bin_name = try allocator.dupe(u8, trimmed[0 .. trimmed.len - 1]);
             current_bin = Binary{ .path = "", .remote_name = current_bin_name, .version = "", .url = "", .provider = "" };
         }
     }
     if (current_bin_name.len > 0) {
         try config.bins.put(current_bin_name, current_bin);
     }
-    
+
     return config;
 }
 
 pub fn save(config: *Config, env: std.process.Environ, io: std.Io) !void {
     const allocator = config.arena.allocator();
     const path = try Config.getConfigPath(allocator, env, io);
-    
+
     const file = try std.Io.Dir.createFileAbsolute(io, path, .{});
     defer file.close(io);
-    
+
     var buf: [4096]u8 = undefined;
     var file_writer = file.writer(io, &buf);
     const w = &file_writer.interface;
@@ -150,7 +150,7 @@ pub fn save(config: *Config, env: std.process.Environ, io: std.Io) !void {
     try w.print("  github: {s}\n", .{config.tokens.github});
     try w.print("  gitlab: {s}\n", .{config.tokens.gitlab});
     try w.print("  codeberg: {s}\n", .{config.tokens.codeberg});
-    
+
     try w.writeAll("bins:\n");
     var it = config.bins.iterator();
     while (it.next()) |entry| {
@@ -163,4 +163,31 @@ pub fn save(config: *Config, env: std.process.Environ, io: std.Io) !void {
         try w.print("    pinned: {}\n", .{bin.pinned});
     }
     try file_writer.flush();
+}
+
+pub fn validate(conf: *Config, io: std.Io) !void {
+    if (conf.bin_dir.len == 0) {
+        return error.BinDirRequired;
+    }
+
+    // Validate bin_dir exists
+    _ = std.Io.Dir.openDirAbsolute(io, conf.bin_dir, .{}) catch |err| {
+        std.log.err("bin_dir '{s}' is invalid: {}", .{ conf.bin_dir, err });
+        return error.InvalidBinDir;
+    };
+
+    // Validate thread count
+    if (conf.download_threads == 0 or conf.download_threads > 32) {
+        std.log.err("download_threads must be between 1 and 32", .{});
+        return error.InvalidThreadCount;
+    }
+
+    // Validate binaries
+    var it = conf.bins.iterator();
+    while (it.next()) |entry| {
+        const bin = entry.value_ptr.*;
+        if (bin.path.len == 0) return error.BinaryPathRequired;
+        if (bin.url.len == 0) return error.BinaryUrlRequired;
+        if (bin.version.len == 0) return error.BinaryVersionRequired;
+    }
 }

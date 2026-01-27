@@ -1,59 +1,39 @@
-# Implementation Plan
+# Implementation Plan & Bug Fixes
 
-This document outlines the implementation of four major features for bin-zig:
-- Feature 5: Custom Install Path
-- Feature 6: Multiple Binary Operations
-- Feature 7: Explicit Provider Selection
-- Feature 8: Per-Command Help
+This document outlines critical bug fixes and improvements needed for bin-zig.
 
 ---
 
-## FEATURE 5: Custom Install Path
+## Priority 1: Critical Bugs & Missing Functionality
 
-### Summary
-Allow users to specify a custom install path for binaries instead of using the default `bin_dir` from config.
+### Issue 1: Path Expansion Not Implemented
+**Location**: `src/install.zig:65` - `validateAndResolvePath()`
 
-### Changes Required
+**Problem**: Custom install paths are not expanded. `~/bin` and relative paths are not converted to absolute paths.
 
-#### 1. src/install.zig - Update `InstallOptions` struct (line 32)
+**Solution**:
 ```zig
-pub const InstallOptions = struct {
-    alias: ?[]const u8 = null,
-    interactive: bool = false,
-    install_path: ?[]const u8 = null,  // NEW FIELD
-};
-```
+fn validateAndResolvePath(allocator: std.mem.Allocator, path: []const u8, env: std.process.Environ, io: std.Io) ![]const u8 {
+    var resolved_path = path;
 
-#### 2. src/main.zig - Parse install path argument (after line 63)
-- Collect positional arguments after flags
-- Third non-flag argument becomes install path
-- Pass to `install()` via options
-
-Implementation pattern:
-```zig
-var install_path: ?[]const u8 = null;
-while (args_iter.next()) |arg| {
-    if (std.mem.eql(u8, arg, "--as")) {
-        alias = args_iter.next() orelse { /* error */ };
-    } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--all-assets")) {
-        interactive = true;
-    } else if (url == null) {
-        url = arg;
-    } else if (install_path == null) {
-        install_path = arg;
+    // Expand ~ to home directory
+    if (std.mem.startsWith(u8, path, "~/")) {
+        const home = try env.getAlloc(allocator, "HOME") catch b: {
+            if (@import("builtin").os.tag == .windows) {
+                break :b try env.getAlloc(allocator, "USERPROFILE");
+            }
+            return error.HomeNotFound;
+        };
+        defer allocator.free(home);
+        resolved_path = try std.fs.path.join(allocator, &[_][]const u8{ home, path[2..] };
     }
-}
-```
 
-#### 3. src/install.zig - Add path validation function (new function after line 105)
-```zig
-fn validateAndResolvePath(allocator: std.mem.Allocator, path: []const u8, io: std.Io) ![]const u8 {
     // Convert relative to absolute
-    const abs_path = try std.fs.realpathAlloc(allocator, path);
+    const abs_path = try std.fs.realpathAlloc(allocator, resolved_path);
     errdefer allocator.free(abs_path);
 
     // Check if directory exists (DO NOT create it)
-    const dir = std.Io.Dir.openAbsolute(io, abs_path, {}) catch |err| {
+    const dir = std.Io.Dir.openDirAbsolute(io, abs_path, .{}) catch |err| {
         if (err == error.FileNotFound or err == error.NotDir) {
             std.log.err("Install path does not exist: {s}", .{abs_path});
             std.log.err("Please create the directory first and try again.", .{});
@@ -67,7 +47,7 @@ fn validateAndResolvePath(allocator: std.mem.Allocator, path: []const u8, io: st
     const test_file_path = try std.fs.path.join(allocator, &[_][]const u8{ abs_path, ".bin_write_test" });
     defer allocator.free(test_file_path);
 
-    const test_file = std.Io.Dir.createFileAbsolute(io, test_file_path, .{ .read = true }) catch |err| {
+    const test_file = std.Io.Dir.createFileAbsolute(io, test_file_path, .{ .read = true }) catch {
         std.log.err("Install path is not writable: {s}", .{abs_path});
         return error.PathNotWritable;
     };
@@ -78,761 +58,360 @@ fn validateAndResolvePath(allocator: std.mem.Allocator, path: []const u8, io: st
 }
 ```
 
-#### 4. src/install.zig - Update `install()` function (after line 37)
-- Call validation if `install_path` provided
-- Pass validated path to `finalizeInstall()`
-
-Implementation:
+**Update function signature** (line 95):
 ```zig
 pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const u8, env: std.process.Environ, io: std.Io, options: InstallOptions) !void {
-    // Validate install path if provided
+    // ...
     const resolved_install_path = if (options.install_path) |path|
-        try validateAndResolvePath(allocator, path, io)
+        try validateAndResolvePath(allocator, path, env, io)
     else
         null;
-    defer if (resolved_install_path) |p| allocator.free(p);
-
-    // ... rest of function ...
-
-    // Pass resolved_install_path to finalizeInstall calls
-    try finalizeInstall(allocator, conf, env, io, download_path, url, repo, tag_name, provider_name, options.alias, resolved_install_path);
+    // ...
 }
-```
-
-#### 5. src/install.zig - Update `finalizeInstall()` signature (line 196)
-```zig
-fn finalizeInstall(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.Environ, io: std.Io, download_path: []const u8, url: []const u8, repo: []const u8, version: []const u8, provider_name: []const u8, alias: ?[]const u8, custom_path: ?[]const u8) !void
-```
-
-#### 6. src/install.zig - Update `finalizeInstall()` body (line 197)
-```zig
-const install_path_dir = custom_path orelse conf.bin_dir;
-```
-
-#### 7. Update README.md
-Document custom install path usage:
-```bash
-# Absolute path
-bin install cli/cli /usr/local/bin/gh
-
-# Relative path (converted to absolute)
-bin install cli/cli ~/bin/gh
-bin install cli/cli ./bin/gh
 ```
 
 ---
 
-## FEATURE 6: Multiple Binary Operations
+### Issue 2: Hardcoded Response Size Limit
+**Location**: `src/github.zig:49`, `src/gitlab.zig`, `src/codeberg.zig`
 
-### Summary
-Allow `remove`, `pin`, `unpin`, and `update` commands to process multiple binaries in a single invocation.
+**Problem**: 1MB response limit will fail for projects with many release assets.
 
-### Changes Required
-
-#### 1. src/main.zig - Update `remove` command (lines 88-94)
-Replace single `name` with collection loop:
+**Solution**: Make limit configurable and increase default:
 ```zig
-} else if (std.mem.eql(u8, command, "remove")) {
-    var names = std.ArrayList([]const u8).init(allocator);
-    defer names.deinit();
-
-    while (args_iter.next()) |name| {
-        try names.append(name);
-    }
-
-    if (names.items.len == 0) {
-        std.log.err("Usage: bin remove <name...>", .{});
-        return;
-    }
-
-    try remove_cmd.remove(allocator, &conf, names.items, init.minimal.environ, init.io);
-}
+const body_size = 10 * 1024 * 1024; // 10MB limit for response
 ```
 
-#### 2. src/main.zig - Update `pin` command (lines 97-103)
-Same pattern as remove:
-```zig
-} else if (std.mem.eql(u8, command, "pin")) {
-    var names = std.ArrayList([]const u8).init(allocator);
-    defer names.deinit();
+Add to `DownloadOptions` or as a compile-time option if needed.
 
-    while (args_iter.next()) |name| {
-        try names.append(name);
-    }
+---
 
-    if (names.items.len == 0) {
-        std.log.err("Usage: bin pin <name...>", .{});
-        return;
-    }
+### Issue 3: No Test Coverage for Core Functionality
+**Problem**: Only root.zig has tests. No tests for install, update, remove, config, providers, download, extract, or checksum.
 
-    try pin_cmd.pin(allocator, &conf, names.items, init.minimal.environ, init.io);
-}
+**Solution**: Create comprehensive test suite.
+
+#### Test Structure:
+```
+src/
+├── tests/
+│   ├── test_config.zig
+│   ├── test_install.zig
+│   ├── test_providers.zig
+│   ├── test_download.zig
+│   ├── test_extract.zig
+│   └── test_checksum.zig
 ```
 
-#### 3. src/main.zig - Update `unpin` command (lines 104-110)
-Same pattern as remove:
-```zig
-} else if (std.mem.eql(u8, command, "unpin")) {
-    var names = std.ArrayList([]const u8).init(allocator);
-    defer names.deinit();
-
-    while (args_iter.next()) |name| {
-        try names.append(name);
-    }
-
-    if (names.items.len == 0) {
-        std.log.err("Usage: bin unpin <name...>", .{});
-        return;
-    }
-
-    try pin_cmd.unpin(allocator, &conf, names.items, init.minimal.environ, init.io);
-}
-```
-
-#### 4. src/main.zig - Update `update` command (lines 74-85)
-Collect multiple targets if `--all` not set:
-```zig
-} else if (std.mem.eql(u8, command, "update")) {
-    var targets = std.ArrayList([]const u8).init(allocator);
-    defer targets.deinit();
-
-    var all_flag = false;
-
-    while (args_iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--all")) {
-            all_flag = true;
-        } else {
-            try targets.append(arg);
-        }
-    }
-
-    try update_cmd.update(allocator, &conf, if (targets.items.len == 0) null else targets.items, all_flag, init.minimal.environ, init.io);
-}
-```
-
-#### 5. src/remove.zig - Refactor for multiple names (entire file)
+#### Example: `src/tests/test_config.zig`:
 ```zig
 const std = @import("std");
-const config = @import("config.zig");
+const config = @import("../config.zig");
 
-pub fn remove(allocator: std.mem.Allocator, conf: *config.Config, names: []const []const u8, env: std.process.Environ, io: std.Io) !void {
-    _ = allocator;
+test "config: load empty config returns defaults" {
+    const allocator = std.testing.allocator;
+    var conf = try config.load(allocator, .{}, .{});
+    defer conf.deinit();
 
-    var successes: usize = 0;
-    var failures = std.ArrayList([]const u8).init(allocator);
-    defer failures.deinit();
+    try std.testing.expectEqual(@as(u32, 4), conf.download_threads);
+    try std.testing.expectEqual(@as(usize, 0), conf.bins.count());
+}
 
-    for (names) |name| {
-        var it = conf.bins.iterator();
-        var bin_to_remove: ?config.Binary = null;
-        var key_to_remove: ?[]const u8 = null;
+test "config: save and load preserves data" {
+    const allocator = std.testing.allocator;
+    var conf = try config.load(allocator, .{}, .{});
+    defer conf.deinit();
 
-        var input_clean = name;
-        if (std.mem.endsWith(u8, name, ".exe")) {
-            input_clean = name[0 .. name.len - 4];
-        }
+    try conf.bins.put(try allocator.dupe(u8, "test"), .{
+        .path = try allocator.dupe(u8, "/path/to/test"),
+        .remote_name = "test",
+        .version = "v1.0.0",
+        .url = "https://example.com/repo",
+        .provider = "github",
+        .pinned = false,
+    });
 
-        while (it.next()) |entry| {
-            var remote_clean = entry.value_ptr.remote_name;
-            if (std.mem.endsWith(u8, remote_clean, ".exe")) {
-                remote_clean = remote_clean[0..remote_clean.len-4];
-            }
+    try config.save(&conf, .{}, .{});
 
-            if (std.mem.eql(u8, remote_clean, input_clean)) {
-                bin_to_remove = entry.value_ptr.*;
-                key_to_remove = entry.key_ptr.*;
-                break;
-            }
-        }
+    var conf2 = try config.load(allocator, .{}, .{});
+    defer conf2.deinit();
 
-        if (bin_to_remove == null) {
-            std.log.warn("Binary '{s}' not found in managed list.", .{name});
-            try failures.append(name);
-            continue;
-        }
-
-        // Remove file
-        std.Io.Dir.deleteFileAbsolute(io, bin_to_remove.?.path) catch |err| {
-            std.log.warn("Could not delete file {s}: {}", .{ bin_to_remove.?.path, err });
-            try failures.append(name);
-            continue;
-        };
-
-        // Remove from config
-        _ = conf.bins.remove(key_to_remove.?);
-        std.log.info("Successfully removed '{s}'", .{name});
-        successes += 1;
-    }
-
-    // Save config once after all operations
-    try config.save(conf, env, io);
-
-    // Report summary
-    if (successes > 0) {
-        std.log.info("Successfully removed {d} binary(s)", .{successes});
-    }
-    if (failures.items.len > 0) {
-        std.log.warn("Failed to remove: {s}", .{failures.items});
-    }
-
-    return if (successes == 0) error.AllOperationsFailed else if (failures.items.len > 0) error.SomeOperationsFailed else {};
+    try std.testing.expectEqual(@as(usize, 1), conf2.bins.count());
 }
 ```
 
-#### 6. src/pin.zig - Refactor `pin()` for multiple names
+#### Add test runner to `build.zig`:
 ```zig
-const std = @import("std");
-const config = @import("config.zig");
-
-pub fn pin(allocator: std.mem.Allocator, conf: *config.Config, names: []const []const u8, env: std.process.Environ, io: std.Io) !void {
-    _ = allocator;
-
-    var successes: usize = 0;
-    var failures = std.ArrayList([]const u8).init(allocator);
-    defer failures.deinit();
-
-    for (names) |name| {
-        var found = false;
-        var it = conf.bins.iterator();
-        while (it.next()) |entry| {
-            if (std.mem.eql(u8, entry.value_ptr.remote_name, name)) {
-                entry.value_ptr.pinned = true;
-                std.log.info("Pinned {s} to version {s}", .{ name, entry.value_ptr.version });
-                successes += 1;
-                found = true;
-                break;
-            }
-        }
-
-        if (!found) {
-            std.log.warn("Binary '{s}' not found.", .{name});
-            try failures.append(name);
-        }
-    }
-
-    if (successes > 0) {
-        try config.save(conf, env, io);
-        std.log.info("Successfully pinned {d} binary(s)", .{successes});
-    }
-    if (failures.items.len > 0) {
-        std.log.warn("Failed to pin: {s}", .{failures.items});
-    }
-
-    return if (successes == 0) error.AllOperationsFailed else if (failures.items.len > 0) error.SomeOperationsFailed else {};
-}
-
-pub fn unpin(allocator: std.mem.Allocator, conf: *config.Config, names: []const []const u8, env: std.process.Environ, io: std.Io) !void {
-    _ = allocator;
-
-    var successes: usize = 0;
-    var failures = std.ArrayList([]const u8).init(allocator);
-    defer failures.deinit();
-
-    for (names) |name| {
-        var found = false;
-        var it = conf.bins.iterator();
-        while (it.next()) |entry| {
-            if (std.mem.eql(u8, entry.value_ptr.remote_name, name)) {
-                entry.value_ptr.pinned = false;
-                std.log.info("Unpinned {s}", .{name});
-                successes += 1;
-                found = true;
-                break;
-            }
-        }
-
-        if (!found) {
-            std.log.warn("Binary '{s}' not found.", .{name});
-            try failures.append(name);
-        }
-    }
-
-    if (successes > 0) {
-        try config.save(conf, env, io);
-        std.log.info("Successfully unpinned {d} binary(s)", .{successes});
-    }
-    if (failures.items.len > 0) {
-        std.log.warn("Failed to unpin: {s}", .{failures.items});
-    }
-
-    return if (successes == 0) error.AllOperationsFailed else if (failures.items.len > 0) error.SomeOperationsFailed else {};
-}
+// After existing test setup...
+const test_bin_install = b.addTest(.{
+    .root_source_file = b.path("src/tests/test_install.zig"),
+    .target = target,
+});
+test_step.dependOn(&b.addRunArtifact(test_bin_install).step);
+// ... add for each test file
 ```
 
-#### 7. src/update.zig - Update to accept multiple targets (line 8)
+---
+
+## Priority 2: Code Quality & Maintainability
+
+
+
+### Issue 4: No Config Value Validation
+**Location**: `src/config.zig` - `load()` function
+
+**Problem**: Config values loaded without validation (e.g., invalid bin_dir, empty URLs).
+
+**Solution**: Add validation after loading:
 ```zig
-pub fn update(allocator: std.mem.Allocator, conf: *config.Config, targets: ?[]const []const u8, all_flag: bool, env: std.process.Environ, io: std.Io) !void {
-    if (all_flag) {
-        std.log.info("Updating all binaries...", .{});
-        var it = conf.bins.iterator();
-        while (it.next()) |entry| {
-            try updateOne(allocator, conf, entry.value_ptr.*, env, io);
-        }
-        return;
+pub fn validate(conf: *Config) !void {
+    if (conf.bin_dir.len == 0) {
+        return error.BinDirRequired;
     }
 
-    if (targets) |names| {
-        for (names) |name| {
-            var it = conf.bins.iterator();
-            while (it.next()) |entry| {
-                if (std.mem.eql(u8, entry.value_ptr.remote_name, name)) {
-                    try updateOne(allocator, conf, entry.value_ptr.*, env, io);
-                    break;
-                }
-            }
-            std.log.err("Binary '{s}' not found in managed list.", .{name});
-        }
-        return;
+    // Validate bin_dir exists
+    std.Io.Dir.openDirAbsolute(io, conf.bin_dir, .{}) catch |err| {
+        std.log.err("bin_dir '{s}' is invalid: {}", .{conf.bin_dir, err});
+        return error.InvalidBinDir;
+    };
+
+    // Validate thread count
+    if (conf.download_threads == 0 or conf.download_threads > 32) {
+        std.log.err("download_threads must be between 1 and 32", .{});
+        return error.InvalidThreadCount;
     }
 
-    // Default: Check for updates (no targets specified)
-    std.log.info("Checking for updates...", .{});
-    var client = std.http.Client{ .allocator = allocator, .io = io };
-    defer client.deinit();
+    // Validate tokens format (if provided)
+    if (conf.tokens.github.len > 0 and !isValidTokenFormat(conf.tokens.github)) {
+        return error.InvalidGitHubToken;
+    }
 
+    // Validate binaries
     var it = conf.bins.iterator();
-    var found_updates = false;
     while (it.next()) |entry| {
         const bin = entry.value_ptr.*;
-        if (bin.pinned) continue;
-
-        const latest_version = try getLatestVersion(allocator, &client, bin, conf);
-        defer allocator.free(latest_version);
-
-        if (!std.mem.eql(u8, bin.version, latest_version)) {
-            std.log.info("  {s}: {s} -> {s} (update available)", .{ bin.remote_name, bin.version, latest_version });
-            found_updates = true;
-        }
-    }
-
-    if (!found_updates) {
-        std.log.info("All binaries are up to date.", .{});
-    } else {
-        std.log.info("Run 'bin update --all' to update all binaries.", .{});
+        if (bin.path.len == 0) return error.BinaryPathRequired;
+        if (bin.url.len == 0) return error.BinaryUrlRequired;
+        if (bin.version.len == 0) return error.BinaryVersionRequired;
     }
 }
 ```
 
-#### 8. Update README.md
-Document multiple operations:
-```bash
-# Remove multiple binaries
-bin remove gh kubectl fzf
-
-# Pin multiple binaries
-bin pin terraform kubectl
-
-# Update multiple binaries
-bin update gh kubectl
+Call validation in `main.zig` after loading config:
+```zig
+var conf = try config.load(allocator, init.minimal.environ, init.io);
+defer conf.deinit();
+try config.validate(&conf);
 ```
 
 ---
 
-## FEATURE 7: Explicit Provider Selection
+### Issue 5: Duplicate Command Parsing Patterns
+**Location**: `src/main.zig:106-148` - remove, pin, unpin commands
 
-### Summary
-Allow users to explicitly specify a provider using `--provider` flag. Three supported URL formats:
-1. Full URL: `https://github.com/cli/cli` (auto-detect)
-2. Domain format: `github.com/cli/cli` (auto-detect)
-3. Short format: `cli/cli` (requires `--provider` flag, defaults to github if not specified)
+**Problem**: Identical ArrayList initialization pattern repeated 3 times.
 
-### Changes Required
-
-#### 1. src/install.zig - Update `Provider` enum and `fromUrl()` (lines 11-30)
+**Solution**: Create helper function:
 ```zig
-pub const Provider = enum {
-    github,
-    gitlab,
-    codeberg,
+fn collectNames(allocator: std.mem.Allocator, args_iter: *std.process.Args.Iterator(Allocator)) ![]const []const u8 {
+    var names = std.ArrayList([]const u8).init(allocator);
+    errdefer names.deinit();
 
-    pub fn fromUrl(url: []const u8, explicit_provider: ?Provider) !Provider {
-        // If explicit provider provided, use it
-        if (explicit_provider) |prov| return prov;
-
-        // Auto-detect from full URL (https://)
-        if (std.mem.indexOf(u8, url, "https://github.com/") != null) return .github;
-        if (std.mem.indexOf(u8, url, "https://gitlab.com/") != null) return .gitlab;
-        if (std.mem.indexOf(u8, url, "https://codeberg.org/") != null) return .codeberg;
-
-        // Auto-detect from domain format (github.com/)
-        if (std.mem.indexOf(u8, url, "github.com/") != null) return .github;
-        if (std.mem.indexOf(u8, url, "gitlab.com/") != null) return .gitlab;
-        if (std.mem.indexOf(u8, url, "codeberg.org/") != null) return .codeberg;
-
-        // Validate user/repo format (exactly one slash)
-        var slash_count: usize = 0;
-        var it = std.mem.splitScalar(u8, url, '/');
-        var parts: [2][]const u8 = undefined;
-        while (it.next()) |part| {
-            if (slash_count < 2) {
-                parts[slash_count] = part;
-            }
-            slash_count += 1;
-        }
-
-        if (slash_count != 2 or parts[0].len == 0 or parts[1].len == 0) {
-            return error.InvalidURL;
-        }
-
-        // Default to github for "user/repo" format
-        return .github;
+    while (args_iter.next()) |name| {
+        try names.append(allocator, name);
     }
 
-    pub fn prefix(self: Provider) []const u8 {
-        return switch (self) {
-            .github => "github.com/",
-            .gitlab => "gitlab.com/",
-            .codeberg => "codeberg.org/",
-        };
+    if (names.items.len == 0) {
+        return error.NoNamesProvided;
     }
+
+    return names.toOwnedSlice();
+}
+```
+
+Then use in each command:
+```zig
+} else if (std.mem.eql(u8, command, "remove")) {
+    var names = try collectNames(allocator, &args_iter);
+    defer allocator.free(names);
+
+    try remove_cmd.remove(allocator, &conf, names, init.minimal.environ, init.io);
+}
+```
+
+---
+
+### Issue 6: Minimal Error Handling
+**Location**: Throughout codebase - many bare `try` statements
+
+**Problem**: Generic error messages don't help users understand what went wrong.
+
+**Solution**: Add context to errors:
+```zig
+// Before
+const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+
+// After
+const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
+    std.log.err("Failed to open config file at '{s}': {}", .{path, err});
+    return err;
 };
 ```
 
-#### 2. src/install.zig - Update `InstallOptions` struct (line 32)
+Create error context wrapper:
 ```zig
-pub const InstallOptions = struct {
-    alias: ?[]const u8 = null,
-    interactive: bool = false,
-    install_path: ?[]const u8 = null,
-    provider: ?Provider = null,  // NEW FIELD
-};
-```
-
-#### 3. src/main.zig - Add `--provider` flag parsing (after line 62)
-```zig
-} else if (std.mem.eql(u8, command, "install")) {
-    var url: ?[]const u8 = null;
-    var alias: ?[]const u8 = null;
-    var interactive = false;
-    var provider: ?install_cmd.Provider = null;
-
-    while (args_iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--as")) {
-            alias = args_iter.next() orelse {
-                std.log.err("--as requires a name", .{});
-                return;
-            };
-        } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--all-assets")) {
-            interactive = true;
-        } else if (std.mem.eql(u8, arg, "--provider")) {
-            const prov_str = args_iter.next() orelse {
-                std.log.err("--provider requires a type (github, gitlab, codeberg)", .{});
-                return;
-            };
-            provider = if (std.mem.eql(u8, prov_str, "github")) .github
-                       else if (std.mem.eql(u8, prov_str, "gitlab")) .gitlab
-                       else if (std.mem.eql(u8, prov_str, "codeberg")) .codeberg
-                       else {
-                           std.log.err("Unknown provider: {s}", .{prov_str});
-                           std.log.err("Supported providers: github, gitlab, codeberg", .{});
-                           return;
-                       };
-        } else if (url == null) {
-            url = arg;
-        }
-    }
-
-    if (url == null) {
-        std.log.err("Usage: bin install <url> [--as <name>] [-a] [--provider <type>] [path]", .{});
-        return;
-    }
-
-    try install_cmd.install(allocator, &conf, url.?, init.minimal.environ, init.io, .{
-        .alias = alias,
-        .interactive = interactive,
-        .provider = provider,
-    });
-```
-
-#### 4. src/install.zig - Update `install()` function (line 41)
-Update provider detection to use new signature:
-```zig
-const provider = try Provider.fromUrl(url, options.provider);
-```
-
-#### 5. src/install.zig - Handle different URL formats (after line 42)
-Update URL parsing to work with all three formats:
-```zig
-const provider = try Provider.fromUrl(url, options.provider);
-const pref = provider.prefix();
-
-var rest: []const u8 = undefined;
-
-// Handle full URL (https://)
-if (std.mem.indexOf(u8, url, "https://") != null) {
-    const idx = std.mem.indexOf(u8, url, pref).?;
-    rest = url[idx + pref.len ..];
-}
-// Handle domain format (github.com/) or short format (user/repo)
-else if (std.mem.indexOf(u8, url, pref) != null) {
-    const idx = std.mem.indexOf(u8, url, pref).?;
-    rest = url[idx + pref.len ..];
-}
-// Short format (user/repo)
-else {
-    rest = url;
+fn withContext(comptime msg: []const u8, err: anyerror, args: anytype) error{ContextError} {
+    std.log.err(msg, args);
+    return err;
 }
 
-var it = std.mem.splitScalar(u8, rest, '/');
-const user = it.next() orelse return error.InvalidURL;
-var repo_full = it.next() orelse return error.InvalidURL;
-```
-
-#### 6. Update README.md
-Document all three URL formats:
-```bash
-# Full URL (auto-detect)
-bin install https://github.com/cli/cli
-
-# Domain format (auto-detect)
-bin install github.com/cli/cli
-bin install gitlab.com/gitlab-org/cli
-bin install codeberg.org/mergiraf/mergiraf
-
-# Short format (defaults to GitHub)
-bin install cli/cli
-
-# Short format with explicit provider
-bin install --provider github cli/cli
-bin install --provider gitlab gitlab-org/cli
-bin install --provider codeberg mergiraf/mergiraf
+// Usage:
+const file = withContext("Failed to open config file at '{s}'",
+    std.Io.Dir.openFileAbsolute(io, path, .{}), .{path}) catch |e| return e;
 ```
 
 ---
 
-## FEATURE 8: Per-Command Help
+### Issue 7: Orphan Code in root.zig
+**Location**: `src/root.zig`
 
-### Summary
-Add `help` command that displays detailed help for specific commands.
+**Problem**: Contains demo functions not used anywhere in the project.
 
-### Changes Required
+**Solution**: Remove unused code or convert to actual library exports:
 
-#### 1. src/main.zig - Add `help` command (after line 116)
+**Option A**: Remove entirely (if root.zig is just placeholder):
 ```zig
-} else if (std.mem.eql(u8, command, "help")) {
-    const subcommand = args_iter.next();
-    if (subcommand == null) {
-        printHelp();
-        return;
-    }
-    printCommandHelp(subcommand.?);
-    return;
+//! By convention, root.zig is the root source file when making a package.
+const std = @import("std");
+
+// Export core types and functions for library usage
+pub const Config = @import("config.zig").Config;
+pub const Binary = @import("config.zig").Binary;
+
+pub const install = @import("install.zig").install;
+pub const update = @import("update.zig").update;
+pub const remove = @import("remove.zig").remove;
 ```
 
-#### 2. src/main.zig - Create `printCommandHelp()` function (after line 151)
+**Option B**: Keep if library usage is intended:
 ```zig
-fn printCommandHelp(command: []const u8) void {
-    if (std.mem.eql(u8, command, "install")) {
-        std.debug.print(
-            \\bin install <url> [path] - Install binary from GitHub, GitLab, or Codeberg
-            \\
-            \\Arguments:
-            \\  url       Repository URL or user/repo
-            \\            Supported formats:
-            \\              - Full URL: https://github.com/cli/cli
-            \\              - Domain: github.com/cli/cli
-            \\              - Short: cli/cli (defaults to GitHub)
-            \\  path      Optional custom install directory (absolute or relative)
-            \\            Path must exist and be writable.
-            \\
-            \\Flags:
-            \\  --as <name>         Install with custom alias instead of repo name
-            \\  -a, --all-assets    Interactive mode to manually select from assets
-            \\  --provider <type>    Explicit provider: github, gitlab, or codeberg
-            \\
-            \\Examples:
-            \\  bin install cli/cli
-            \\  bin install gitlab.com/gitlab-org/cli --as glab
-            \\  bin install cli/cli ~/bin/gh
-            \\  bin install cli/cli --as gh -a
-            \\  bin install --provider gitlab gitlab-org/cli
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "update")) {
-        std.debug.print(
-            \\bin update [name...] - Update installed binaries
-            \\
-            \\Arguments:
-            \\  name      One or more binary names to update (optional)
-            \\
-            \\Flags:
-            \\  --all     Update all managed binaries
-            \\
-            \\Examples:
-            \\  bin update           Check all binaries for updates
-            \\  bin update gh        Update specific binary
-            \\  bin update gh kubectl Update multiple binaries
-            \\  bin update --all     Update all binaries
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "list")) {
-        std.debug.print(
-            \\bin list - List installed binaries and versions
-            \\
-            \\Displays all managed binaries with their version, path, and provider.
-            \\
-            \\Example output:
-            \\  gh (version: v2.40.0, path: /home/user/.local/bin/gh, provider: github)
-            \\  kubectl (version: v1.29.0, path: /home/user/.local/bin/kubectl, provider: github)
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "remove")) {
-        std.debug.print(
-            \\bin remove <name...> - Remove one or more installed binaries
-            \\
-            \\Arguments:
-            \\  name      One or more binary names to remove
-            \\
-            \\Examples:
-            \\  bin remove gh
-            \\  bin remove gh kubectl fzf
-            \\  bin remove gh.exe  (also works without .exe)
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "ensure")) {
-        std.debug.print(
-            \\bin ensure - Verify and reinstall missing binaries
-            \\
-            \\Checks all managed binaries and reinstalls any that are missing from disk.
-            \\Useful for restoration after system maintenance or cleanup.
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "pin")) {
-        std.debug.print(
-            \\bin pin <name...> - Lock binary to current version
-            \\
-            \\Arguments:
-            \\  name      One or more binary names to pin
-            \\
-            \\Pinned binaries will not be updated by 'bin update --all'.
-            \\
-            \\Examples:
-            \\  bin pin terraform
-            \\  bin pin terraform kubectl
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "unpin")) {
-        std.debug.print(
-            \\bin unpin <name...> - Unlock binary for updates
-            \\
-            \\Arguments:
-            \\  name      One or more binary names to unpin
-            \\
-            \\Examples:
-            \\  bin unpin terraform
-            \\  bin unpin terraform kubectl
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "prune")) {
-        std.debug.print(
-            \\bin prune - Remove dead entries from configuration
-            \\
-            \\Removes entries for binaries that no longer exist on disk
-            \\from the managed binaries list.
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "clean")) {
-        std.debug.print(
-            \\bin clean - Clear download/extraction cache
-            \\
-            \\Removes all cached downloaded files from the cache directory.
-            \\Does not affect installed binaries.
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "info")) {
-        std.debug.print(
-            \\bin info - Show API rate limit information
-            \\
-            \\Displays current API rate limit status for GitHub, GitLab, and Codeberg.
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "help")) {
-        std.debug.print(
-            \\bin help [command] - Display help information
-            \\
-            \\Arguments:
-            \\  command   Optional command to show detailed help for
-            \\
-            \\Examples:
-            \\  bin help           Show general help
-            \\  bin help install   Show detailed install command help
-            \\
-        , .{});
-    } else {
-        std.log.err("Unknown command: {s}", .{command});
-        std.debug.print("\nRun 'bin help' to see all available commands.\n", .{});
-    }
+//! Bin-zig library exports
+const std = @import("std");
+
+// Core functionality for programmatic use
+pub const Config = @import("config.zig").Config;
+pub const Binary = @import("config.zig").Binary;
+
+pub fn installBinary(allocator: std.mem.Allocator, conf: *Config, url: []const u8, options: InstallOptions) !void {
+    const env = try std.process.getEnviron(allocator);
+    defer env.deinit();
+    return @import("install.zig").install(allocator, conf, url, env, .{}, options);
 }
 ```
 
-#### 3. src/main.zig - Update `printHelp()` to include help command (line 144)
-```zig
-\\  help [command]   Show help for specific command
-```
+---
 
-#### 4. Update README.md
-Add to Commands Reference table:
-```markdown
-| `bin help [command]`       | Show help for any command                     | `bin help install`                          |
-```
+## Priority 3: Documentation & UX Improvements
+
+### Issue 8: CHANGES.md Stale Content
+**Problem**: CHANGES.md documented implementation plan for features that are already implemented. Should track actual changes and work to be done.
+
+**Solution**: Convert this file to track actual implementation status and bug fixes.
 
 ---
 
-## IMPLEMENTATION ORDER
+## Implementation Order
 
-1. **Feature 7** (Explicit Provider) - Foundation for install command URL parsing
-2. **Feature 5** (Custom Install Path) - Builds on install command
-3. **Feature 6** (Multiple Operations) - Independent feature
-4. **Feature 8** (Per-Command Help) - Documentation layer
+### Phase 1: Critical Functionality (Week 1)
+1. Fix path expansion (Issue 1) - affects custom install paths
+2. Increase response size limit (Issue 2) - prevents failures
+3. Add config validation (Issue 4) - catches invalid configs early
 
----
+### Phase 2: Code Quality (Week 2)
+4. Remove orphan code (Issue 7) - clean up
+5. Refactor command parsing (Issue 5) - reduce duplication
+6. Improve error handling (Issue 6) - better UX
 
-## TESTING CHECKLIST
-
-After implementation:
-
-### Feature 5: Custom Install Path
-- [ ] Test absolute path installation
-- [ ] Test relative path installation (converted to absolute)
-- [ ] Test path doesn't exist (error message)
-- [ ] Test path not writable (error message)
-- [ ] Verify config stores absolute path
-
-### Feature 6: Multiple Binary Operations
-- [ ] Test multiple remove operations
-- [ ] Test multiple pin operations
-- [ ] Test multiple unpin operations
-- [ ] Test multiple update operations
-- [ ] Test continue-on-error (some succeed, some fail)
-- [ ] Test all operations fail (return error)
-- [ ] Test summary output
-
-### Feature 7: Explicit Provider Selection
-- [ ] Test full URL format (https://)
-- [ ] Test domain format (github.com/)
-- [ ] Test short format with default github
-- [ ] Test short format with explicit provider (gitlab, codeberg)
-- [ ] Test invalid provider (error message)
-- [ ] Test invalid URL format (error message)
-
-### Feature 8: Per-Command Help
-- [ ] Test `bin help` (shows general help)
-- [ ] Test `bin help install` (shows detailed install help)
-- [ ] Test `bin help` for all commands
-- [ ] Test `bin help invalid` (shows error)
+### Phase 3: Testing & Reliability (Week 3-4)
+7. Implement test suite (Issue 3) - core functionality tests
 
 ---
 
-## SUMMARY OF KEY DECISIONS
+## Testing Checklist
 
-1. **Path Validation**: Path must exist and be writable. Not created automatically. User is notified if path is invalid.
+After implementing fixes:
 
-2. **Error Reporting**: For multiple operations, if ALL operations fail, return an error. If some succeed, continue processing and report summary of failures.
+### Issue 1: Path Expansion
+- [ ] Test `~/bin` expands correctly on Unix
+- [ ] Test relative paths convert to absolute
+- [ ] Test Windows USERPROFILE expansion
+- [ ] Test invalid paths fail gracefully
 
-3. **Help Command**: Included in general help output. `bin help` shows general help, `bin help <command>` shows detailed help.
+### Issue 2: Response Size
+- [ ] Test with repository having >1MB release data
+- [ ] Test with normal-sized repositories
+- [ ] Verify no performance regression
 
-4. **URL Format Validation**: Validates that short format (user/repo) contains exactly one slash with non-empty parts.
+### Issue 3: Tests
+- [ ] Test config load/save
+- [ ] Test URL parsing for all providers
+- [ ] Test asset selection logic
+- [ ] Test download functionality
+- [ ] Test extraction for all formats
+- [ ] Test SHA256 verification
+- [ ] Test install/update/remove commands
 
-5. **Multiple Operations Summary**: Shows success count and simple list of failed names.
+### Issue 4: Validation
+- [ ] Test invalid bin_dir
+- [ ] Test invalid thread count
+- [ ] Test invalid binary entries
+- [ ] Test empty required fields
 
-6. **Continue-on-Error Strategy**: Process all operations regardless of individual failures. Report summary at the end.
+### Issue 5: Refactoring
+- [ ] Verify all commands work after refactoring
+- [ ] Test error messages unchanged
+
+### Issue 6: Error Messages
+- [ ] Verify descriptive error messages
+- [ ] Test error recovery where possible
+
+---
+
+## Summary of Key Decisions
+
+1. **Path Expansion**: Must support both `~` and relative paths. Use std.fs.realpathAlloc() for absolute conversion.
+
+2. **Testing Strategy**: Add comprehensive test coverage for all core modules. Test suite should run with `zig build test`.
+
+3. **Error Messages**: Wrap all try statements with context for better user experience.
+
+4. **Library Usage**: Decide if root.zig should export library functions or be removed. Current recommendation: Export core types for potential library usage.
+
+5. **Validation**: Add validate() function to config module and call immediately after loading.
+
+6. **Response Limits**: Increase to 10MB for large repositories. Consider making configurable if needed.
+
+7. **Refactoring**: Extract common patterns to reduce code duplication while maintaining functionality.
+
+---
+
+## Risk Assessment
+
+| Issue | Risk Level | Impact | Effort | Priority |
+|-------|-----------|---------|---------|----------|
+| Path expansion | High | Users can't use ~ or relative paths | Medium | P1 |
+| Response size | Medium | Fails on large repos | Low | P1 |
+| No tests | High | Bugs go undetected | High | P1 |
+| No validation | Medium | Invalid configs cause runtime errors | Medium | P1 |
+| Duplicate code | Low | Maintenance burden | Low | P2 |
+| Error handling | Medium | Poor UX on failures | Medium | P2 |
+| Orphan code | Low | Confusion, small file size | Low | P2 |
+
+---
+
+## Next Steps
+
+1. **Immediate**: Fix path expansion (Issue 1) and response limit (Issue 2)
+2. **This Week**: Add config validation (Issue 4) and remove orphan code (Issue 7)
+3. **Next Week**: Refactor command parsing (Issue 5) and improve errors (Issue 6)
+4. **Following Weeks**: Implement comprehensive test suite (Issue 3)

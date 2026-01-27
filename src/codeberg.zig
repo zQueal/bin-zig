@@ -50,7 +50,7 @@ pub fn fetchRelease(allocator: std.mem.Allocator, client: *std.http.Client, user
 
     var transfer_buffer: [8192]u8 = undefined;
     var reader = resp.reader(&transfer_buffer);
-    const body = try reader.allocRemaining(allocator, .limited(1024 * 1024));
+    const body = try reader.allocRemaining(allocator, .limited(10 * 1024 * 1024));
     defer allocator.free(body);
 
     const parsed = try std.json.parseFromSlice(GiteaRelease, allocator, body, .{ .ignore_unknown_fields = true });
