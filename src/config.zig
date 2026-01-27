@@ -62,9 +62,10 @@ pub fn load(parent_allocator: std.mem.Allocator, env: std.process.Environ, io: s
 
     const path = try Config.getConfigPath(allocator, env, io);
 
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return config,
-        else => return err,
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
+        if (err == error.FileNotFound) return config;
+        std.log.err("Failed to open config file at '{s}': {}", .{ path, err });
+        return err;
     };
     defer file.close(io);
 
@@ -72,6 +73,7 @@ pub fn load(parent_allocator: std.mem.Allocator, env: std.process.Environ, io: s
     if (file_size == 0) return config;
 
     const buffer = try allocator.alloc(u8, file_size);
+    errdefer allocator.free(buffer);
     _ = try file.readPositionalAll(io, buffer, 0);
 
     var it = std.mem.splitScalar(u8, buffer, '\n');
@@ -137,7 +139,10 @@ pub fn save(config: *Config, env: std.process.Environ, io: std.Io) !void {
     const allocator = config.arena.allocator();
     const path = try Config.getConfigPath(allocator, env, io);
 
-    const file = try std.Io.Dir.createFileAbsolute(io, path, .{});
+    const file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch |err| {
+        std.log.err("Failed to create config file at '{s}': {}", .{ path, err });
+        return err;
+    };
     defer file.close(io);
 
     var buf: [4096]u8 = undefined;

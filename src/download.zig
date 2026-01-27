@@ -24,10 +24,16 @@ const DownloadInfo = struct {
 };
 
 pub fn download(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, dest_path: []const u8, io: std.Io, options: DownloadOptions) !void {
-    const info = try fetchDownloadInfo(allocator, client, url);
+    const info = fetchDownloadInfo(allocator, client, url) catch |err| {
+        std.log.err("Failed to fetch download info for '{s}': {}", .{ url, err });
+        return err;
+    };
     defer allocator.free(info.final_url);
 
-    const file = try std.Io.Dir.createFileAbsolute(io, dest_path, .{ .read = true });
+    const file = std.Io.Dir.createFileAbsolute(io, dest_path, .{ .read = true }) catch |err| {
+        std.log.err("Failed to create file at '{s}': {}", .{ dest_path, err });
+        return err;
+    };
     defer file.close(io);
 
     if (info.supports_ranges and info.size >= options.min_parallel_size and options.threads > 1) {
@@ -38,19 +44,31 @@ pub fn download(allocator: std.mem.Allocator, client: *std.http.Client, url: []c
 }
 
 fn fetchDownloadInfo(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8) !DownloadInfo {
-    const uri = try std.Uri.parse(url);
-    var req = try client.request(.GET, uri, .{
+    const uri = std.Uri.parse(url) catch |err| {
+        std.log.err("Failed to parse URL '{s}': {}", .{ url, err });
+        return err;
+    };
+    var req = client.request(.GET, uri, .{
         .redirect_behavior = @enumFromInt(5),
-    });
+    }) catch |err| {
+        std.log.err("Failed to create HTTP request for '{s}': {}", .{ url, err });
+        return err;
+    };
     defer req.deinit();
 
     var head_buf: [4096]u8 = undefined;
-    var resp = try req.receiveHead(&head_buf);
+    var resp = req.receiveHead(&head_buf) catch |err| {
+        std.log.err("Failed to receive HTTP response headers: {}", .{err});
+        return err;
+    };
 
-    if (resp.head.status != .ok) return error.DownloadFailed;
+    if (resp.head.status != .ok) {
+        std.log.err("HTTP request failed with status {}", .{@intFromEnum(resp.head.status)});
+        return error.DownloadFailed;
+    }
 
     const final_url = try std.fmt.allocPrint(allocator, "{}", .{req.uri});
-    
+
     var size: u64 = 0;
     if (resp.head.content_length) |cl| {
         size = cl;
@@ -94,18 +112,18 @@ fn downloadStreaming(allocator: std.mem.Allocator, client: *std.http.Client, url
     var reader = resp.reader(&transfer_buffer);
     var write_buf: [8192]u8 = undefined;
     var writer = file.writerStreaming(io, &write_buf);
-    
+
     var buf: [8192]u8 = undefined;
     var stdout_buf: [128]u8 = undefined;
     var stdout_file = std.Io.File.stdout();
     var stdout = stdout_file.writer(io, &stdout_buf);
-    
+
     while (true) {
         const n = try reader.readSliceShort(&buf);
         if (n == 0) break;
         try writer.interface.writeAll(buf[0..n]);
         downloaded += n;
-        
+
         if (total_size > 0) {
             const percent = downloaded * 100 / total_size;
             try stdout.interface.print("\rDownloading: {d}% ({d}/{d} bytes)", .{ percent, downloaded, total_size });
@@ -120,8 +138,8 @@ fn downloadStreaming(allocator: std.mem.Allocator, client: *std.http.Client, url
 }
 
 fn downloadParallel(allocator: std.mem.Allocator, client: *std.http.Client, info: DownloadInfo, file: std.Io.File, io: std.Io, options: DownloadOptions) !void {
-    std.log.info("Starting parallel download ({} threads, {d} bytes)...", .{options.threads, info.size});
-    
+    std.log.info("Starting parallel download ({} threads, {d} bytes)...", .{ options.threads, info.size });
+
     const chunk_size = (info.size + options.threads - 1) / options.threads;
     var threads = try allocator.alloc(std.Thread, options.threads);
     defer allocator.free(threads);
@@ -131,7 +149,7 @@ fn downloadParallel(allocator: std.mem.Allocator, client: *std.http.Client, info
 
     var progress_values = try allocator.alloc(std.atomic.Value(u64), options.threads);
     defer allocator.free(progress_values);
-    
+
     var targets = try allocator.alloc(u64, options.threads);
     defer allocator.free(targets);
 
@@ -139,7 +157,7 @@ fn downloadParallel(allocator: std.mem.Allocator, client: *std.http.Client, info
         const start = i * chunk_size;
         const end = @min((i + 1) * chunk_size - 1, info.size - 1);
         const target = end - start + 1;
-        
+
         progress_values[i] = std.atomic.Value(u64).init(0);
         targets[i] = target;
 
@@ -161,7 +179,7 @@ fn downloadParallel(allocator: std.mem.Allocator, client: *std.http.Client, info
     var stdout_buf: [1024]u8 = undefined;
     var stdout_file = std.Io.File.stdout();
     var stdout = stdout_file.writer(io, &stdout_buf);
-    
+
     // Enable VT100 on Windows if possible
     if (@import("builtin").os.tag == .windows) {
         const windows = std.os.windows;
@@ -180,7 +198,7 @@ fn downloadParallel(allocator: std.mem.Allocator, client: *std.http.Client, info
             const d = progress_values[i].load(.monotonic);
             const target = targets[i];
             const percent = if (target > 0) (d * 100 / target) else 100;
-            
+
             // Simplified progress bar [####....]
             const bar_width = 20;
             const filled = (percent * bar_width) / 100;
@@ -188,7 +206,7 @@ fn downloadParallel(allocator: std.mem.Allocator, client: *std.http.Client, info
             for (0..bar_width) |j| {
                 bar[j] = if (j < filled) '#' else '.';
             }
-            
+
             try stdout.interface.print("Thread {d:2}: [{s}] {d:3}% ({d}/{d})\n", .{ i, bar, percent, d, target });
             if (d < target) all_done = false;
         }
@@ -233,15 +251,15 @@ fn downloadChunk(ctx: *const Context) void {
 
     var transfer_buffer: [8192]u8 = undefined;
     var reader = resp.reader(&transfer_buffer);
-    
+
     var buf: [16384]u8 = undefined;
     var offset = ctx.start;
     const limit = ctx.end + 1;
 
     while (offset < limit) {
         const n = reader.readSliceShort(&buf) catch |err| {
-             std.log.err("Thread {}: read error: {any}", .{ ctx.id, err });
-             break;
+            std.log.err("Thread {}: read error: {any}", .{ ctx.id, err });
+            break;
         };
         if (n == 0) break;
         ctx.file.writePositionalAll(ctx.io, buf[0..n], offset) catch |err| {

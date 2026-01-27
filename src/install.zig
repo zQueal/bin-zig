@@ -119,7 +119,10 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const 
         null;
     defer if (resolved_install_path) |p| allocator.free(p);
 
-    const provider = try Provider.fromUrl(url, options.provider);
+    const provider = Provider.fromUrl(url, options.provider) catch |err| {
+        std.log.err("Failed to parse URL '{s}': {}", .{ url, err });
+        return err;
+    };
     const pref = provider.prefix();
 
     var rest: []const u8 = undefined;
@@ -158,7 +161,10 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const 
 
     switch (provider) {
         .github => {
-            const release = try github.fetchRelease(allocator, &client, user, repo, tag, conf.tokens.github);
+            const release = github.fetchRelease(allocator, &client, user, repo, tag, conf.tokens.github) catch |err| {
+                std.log.err("Failed to fetch GitHub release for {s}/{s}: {}", .{ user, repo, err });
+                return err;
+            };
             _ = try github.selectBestAsset(allocator, release); // Score them
             const asset_val = if (options.interactive) try selectGitHubAssetInteractively(release.assets, io) else (try github.selectBestAsset(allocator, release)) orelse return error.NoAssetFound;
 
@@ -172,7 +178,10 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const 
             try finalizeInstall(allocator, conf, env, io, download_path, url, repo, tag_name, "github", options.alias, resolved_install_path);
         },
         .gitlab => {
-            const release = try gitlab.fetchRelease(allocator, &client, user, repo, tag, conf.tokens.gitlab);
+            const release = gitlab.fetchRelease(allocator, &client, user, repo, tag, conf.tokens.gitlab) catch |err| {
+                std.log.err("Failed to fetch GitLab release for {s}/{s}: {}", .{ user, repo, err });
+                return err;
+            };
             _ = try gitlab.selectBestAsset(allocator, release); // Score them
             const asset_val = if (options.interactive) try selectGitLabAssetInteractively(release.assets, io) else (try gitlab.selectBestAsset(allocator, release)) orelse return error.NoAssetFound;
 
@@ -185,7 +194,10 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const 
             try finalizeInstall(allocator, conf, env, io, download_path, url, repo, tag_name, "gitlab", options.alias, resolved_install_path);
         },
         .codeberg => {
-            const release = try codeberg.fetchRelease(allocator, &client, user, repo, tag, conf.tokens.codeberg);
+            const release = codeberg.fetchRelease(allocator, &client, user, repo, tag, conf.tokens.codeberg) catch |err| {
+                std.log.err("Failed to fetch Codeberg release for {s}/{s}: {}", .{ user, repo, err });
+                return err;
+            };
             _ = try codeberg.selectBestAsset(allocator, release); // Score them
             const asset_val = if (options.interactive) try selectCodebergAssetInteractively(release.assets, io) else (try codeberg.selectBestAsset(allocator, release)) orelse return error.NoAssetFound;
 

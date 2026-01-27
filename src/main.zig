@@ -10,6 +10,21 @@ const prune_cmd = @import("prune.zig");
 const clean_cmd = @import("clean.zig");
 const info_cmd = @import("info.zig");
 
+fn collectNames(allocator: std.mem.Allocator, args_iter: *std.process.Args.Iterator) ![]const []const u8 {
+    var names = std.ArrayList([]const u8).empty;
+    errdefer names.deinit(allocator);
+
+    while (args_iter.next()) |name| {
+        try names.append(allocator, name);
+    }
+
+    if (names.items.len == 0) {
+        return error.NoNamesProvided;
+    }
+
+    return names.toOwnedSlice(allocator);
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
@@ -106,49 +121,22 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, command, "list")) {
         try list_cmd.list(allocator, &conf);
     } else if (std.mem.eql(u8, command, "remove")) {
-        var names = std.ArrayList([]const u8).empty;
-        defer names.deinit(allocator);
+        const names = try collectNames(allocator, &args_iter);
+        defer allocator.free(names);
 
-        while (args_iter.next()) |name| {
-            try names.append(allocator, name);
-        }
-
-        if (names.items.len == 0) {
-            std.log.err("Usage: bin remove <name...>", .{});
-            return;
-        }
-
-        try remove_cmd.remove(allocator, &conf, names.items, init.minimal.environ, init.io);
+        try remove_cmd.remove(allocator, &conf, names, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "ensure")) {
         try ensure_cmd.ensure(allocator, &conf, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "pin")) {
-        var names = std.ArrayList([]const u8).empty;
-        defer names.deinit(allocator);
+        const names = try collectNames(allocator, &args_iter);
+        defer allocator.free(names);
 
-        while (args_iter.next()) |name| {
-            try names.append(allocator, name);
-        }
-
-        if (names.items.len == 0) {
-            std.log.err("Usage: bin pin <name...>", .{});
-            return;
-        }
-
-        try pin_cmd.pin(allocator, &conf, names.items, init.minimal.environ, init.io);
+        try pin_cmd.pin(allocator, &conf, names, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "unpin")) {
-        var names = std.ArrayList([]const u8).empty;
-        defer names.deinit(allocator);
+        const names = try collectNames(allocator, &args_iter);
+        defer allocator.free(names);
 
-        while (args_iter.next()) |name| {
-            try names.append(allocator, name);
-        }
-
-        if (names.items.len == 0) {
-            std.log.err("Usage: bin unpin <name...>", .{});
-            return;
-        }
-
-        try pin_cmd.unpin(allocator, &conf, names.items, init.minimal.environ, init.io);
+        try pin_cmd.unpin(allocator, &conf, names, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "prune")) {
         try prune_cmd.prune(allocator, &conf, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "clean")) {

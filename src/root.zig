@@ -1,18 +1,10 @@
-//! By convention, root.zig is the root source file when making a package.
+//! Bin-zig library exports
 const std = @import("std");
-const Io = std.Io;
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
-}
+// Export core types and functions for library usage
+pub const Config = @import("config.zig").Config;
+pub const Binary = @import("config.zig").Binary;
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
-
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
-}
+pub const install = @import("install.zig").install;
+pub const update = @import("update.zig").update;
+pub const remove = @import("remove.zig").remove;
