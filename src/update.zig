@@ -5,7 +5,7 @@ const gitlab = @import("gitlab.zig");
 const codeberg = @import("codeberg.zig");
 const install = @import("install.zig");
 
-pub fn update(allocator: std.mem.Allocator, conf: *config.Config, target: ?[]const u8, all_flag: bool, env: std.process.Environ, io: std.Io) !void {
+pub fn update(allocator: std.mem.Allocator, conf: *config.Config, targets: ?[]const []const u8, all_flag: bool, env: std.process.Environ, io: std.Io) !void {
     if (all_flag) {
         std.log.info("Updating all binaries...", .{});
         var it = conf.bins.iterator();
@@ -15,16 +15,18 @@ pub fn update(allocator: std.mem.Allocator, conf: *config.Config, target: ?[]con
         return;
     }
 
-    if (target) |name| {
-        var it = conf.bins.iterator();
-        while (it.next()) |entry| {
-            if (std.mem.eql(u8, entry.value_ptr.remote_name, name)) {
-                try updateOne(allocator, conf, entry.value_ptr.*, env, io);
-                return;
+    if (targets) |names| {
+        for (names) |name| {
+            var it = conf.bins.iterator();
+            while (it.next()) |entry| {
+                if (std.mem.eql(u8, entry.value_ptr.remote_name, name)) {
+                    try updateOne(allocator, conf, entry.value_ptr.*, env, io);
+                    break;
+                }
             }
+            std.log.err("Binary '{s}' not found in managed list.", .{name});
         }
-        std.log.err("Binary '{s}' not found in managed list.", .{name});
-        return error.BinaryNotFound;
+        return;
     }
 
     // Default: Check for updates

@@ -86,42 +86,66 @@ pub fn main(init: std.process.Init) !void {
 
         try install_cmd.install(allocator, &conf, url.?, init.minimal.environ, init.io, .{ .alias = alias, .interactive = interactive, .provider = provider, .install_path = install_path });
     } else if (std.mem.eql(u8, command, "update")) {
-        var target: ?[]const u8 = null;
+        var targets = std.ArrayList([]const u8).empty;
+        defer targets.deinit(allocator);
+
         var all_flag = false;
 
         while (args_iter.next()) |arg| {
             if (std.mem.eql(u8, arg, "--all")) {
                 all_flag = true;
-            } else if (target == null) {
-                target = arg;
+            } else {
+                try targets.append(allocator, arg);
             }
         }
-        try update_cmd.update(allocator, &conf, target, all_flag, init.minimal.environ, init.io);
+
+        try update_cmd.update(allocator, &conf, if (targets.items.len == 0) null else targets.items, all_flag, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "list")) {
         try list_cmd.list(allocator, &conf);
     } else if (std.mem.eql(u8, command, "remove")) {
-        const name = args_iter.next();
-        if (name == null) {
-            std.log.err("Usage: bin remove <name>", .{});
+        var names = std.ArrayList([]const u8).empty;
+        defer names.deinit(allocator);
+
+        while (args_iter.next()) |name| {
+            try names.append(allocator, name);
+        }
+
+        if (names.items.len == 0) {
+            std.log.err("Usage: bin remove <name...>", .{});
             return;
         }
-        try remove_cmd.remove(allocator, &conf, name.?, init.minimal.environ, init.io);
+
+        try remove_cmd.remove(allocator, &conf, names.items, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "ensure")) {
         try ensure_cmd.ensure(allocator, &conf, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "pin")) {
-        const name = args_iter.next();
-        if (name == null) {
-            std.log.err("Usage: bin pin <name>", .{});
+        var names = std.ArrayList([]const u8).empty;
+        defer names.deinit(allocator);
+
+        while (args_iter.next()) |name| {
+            try names.append(allocator, name);
+        }
+
+        if (names.items.len == 0) {
+            std.log.err("Usage: bin pin <name...>", .{});
             return;
         }
-        try pin_cmd.pin(allocator, &conf, name.?, init.minimal.environ, init.io);
+
+        try pin_cmd.pin(allocator, &conf, names.items, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "unpin")) {
-        const name = args_iter.next();
-        if (name == null) {
-            std.log.err("Usage: bin unpin <name>", .{});
+        var names = std.ArrayList([]const u8).empty;
+        defer names.deinit(allocator);
+
+        while (args_iter.next()) |name| {
+            try names.append(allocator, name);
+        }
+
+        if (names.items.len == 0) {
+            std.log.err("Usage: bin unpin <name...>", .{});
             return;
         }
-        try pin_cmd.unpin(allocator, &conf, name.?, init.minimal.environ, init.io);
+
+        try pin_cmd.unpin(allocator, &conf, names.items, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "prune")) {
         try prune_cmd.prune(allocator, &conf, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "clean")) {
@@ -149,13 +173,13 @@ fn printHelp() void {
         \\                   Flags: --as <name> to rename binary
         \\                          -a, --all-assets to interactively select assets
         \\                          --provider <type> for explicit provider (github/gitlab/codeberg)
-        \\  update [name]    Update installed binaries (specific or all)
+        \\  update [name...] Update installed binaries (specific or all)
         \\                   Flags: --all to update all binaries
         \\  list             List installed binaries and versions
-        \\  remove <name>    Remove installed binary (works with .exe)
+        \\  remove <name...> Remove installed binaries (works with .exe)
         \\  ensure           Verify and reinstall missing binaries
-        \\  pin <name>       Lock binary to current version
-        \\  unpin <name>     Unlock binary for updates
+        \\  pin <name...>    Lock binaries to current versions
+        \\  unpin <name...>  Unlock binaries for updates
         \\  prune            Remove dead entries from configuration
         \\  clean            Clear download/extraction cache
         \\  info             Show API rate limit information

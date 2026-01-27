@@ -46,17 +46,35 @@ The executable will be located in `zig-out/bin/bin`.
 | `bin install <url> [path]` | Install binary from GitHub, GitLab, or Codeberg  | `bin install cli/cli --as gh -a`         |
 | `bin list`                  | List installed binaries and versions       | `bin list`                               |
 | `bin update`                | Check all binaries for available updates   | `bin update`                             |
-| `bin update <name>`         | Update a specific binary                   | `bin update gh`                          |
+| `bin update <name...>`      | Update specific binaries                   | `bin update gh kubectl`                 |
 | `bin update --all`          | Update all managed binaries                | `bin update --all`                       |
-| `bin remove <name>`         | Remove a managed binary (works with .exe)  | `bin remove gh`                          |
+| `bin remove <name...>`      | Remove managed binaries (works with .exe)  | `bin remove gh kubectl fzf`              |
 | `bin ensure`                | Reinstall any missing binaries             | `bin ensure`                             |
-| `bin pin <name>`            | Lock binary to its current version         | `bin pin fzf`                            |
-| `bin unpin <name>`          | Unlock binary for updates                  | `bin unpin fzf`                          |
+| `bin pin <name...>`         | Lock binaries to their current version    | `bin pin terraform kubectl`              |
+| `bin unpin <name...>`       | Unlock binaries for updates                | `bin unpin terraform kubectl`            |
 | `bin info`                  | Show API rate limit information            | `bin info`                               |
 | `bin prune`                 | Remove dead entries from configuration     | `bin prune`                              |
 | `bin clean`                 | Clear download/extraction cache            | `bin clean`                              |
 
 **Tip**: You can install specific versions using the `@` syntax: `bin install github.com/cli/cli@v2.40.1`.
+
+**Multiple Operations**: You can perform operations on multiple binaries at once:
+
+```bash
+# Remove multiple binaries
+bin remove gh kubectl fzf
+
+# Pin multiple binaries
+bin pin terraform kubectl
+
+# Update multiple binaries
+bin update gh kubectl
+
+# Unpin multiple binaries
+bin unpin terraform kubectl
+```
+
+The commands will process all binaries and report a summary of successes and failures. If all operations fail, an error is returned. If some succeed and some fail, a warning is displayed.
 
 ## 🚩 Flags Reference
 
