@@ -1,214 +1,180 @@
-# Bug Report for bin-zig
+# Bug Report
 
-Last updated: January 26, 2026
+## 🚨 CRITICAL ISSUES
 
-## Critical Bugs (7)
+### 1. Memory Leak in GitHub Release Parsing
+**File**: `src/github.zig`  
+**Line**: 58-60  
+**Confidence**: 95
 
-### 1. Memory leak in JSON parsing
-**File**: `src/github.zig:58-59`
-**Confidence**: 95%
-**Severity**: CRITICAL
+**Description**: The `fetchRelease` function uses `std.json.parseFromSlice` to parse JSON but the `parsed` object is never deinitialized. The comment on line 53 says `// defer parsed.deinit(); // Caller needs the strings`, but the strings are copied into the returned struct via `allocator.dupe()`, so the parsed object can and should be deinitialized after copying.
 
-The parsed JSON structure from `std.json.parseFromSlice` is never freed:
-
+**Code Snippet**:
 ```zig
 const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
-// defer parsed.deinit(); // Caller needs the strings - BUT THIS IS NEVER CALLED!
+// defer parsed.deinit(); // Caller needs the strings - INCORRECT COMMENT
+
+const root = parsed.value;
+// ... copy strings via allocator.dupe() ...
+return release; // parsed leaks memory here
 ```
 
-**Impact**: Every install/update from GitHub leaks memory proportional to the JSON response size.
+**Comparison**: In `gitlab.zig`, `codeberg.zig`, and `info.zig`, the `parsed.deinit()` is correctly called after copying the needed data.
 
-**Fix**: Add `defer parsed.deinit();` after the parse.
+**Fix Suggestion**: Add `defer parsed.deinit();` after line 58, or move it to line 91 before the return statement, after all strings have been copied.
 
 ---
 
-### 2. Out-of-bounds memory access - String slicing without length check
-**File**: `src/remove.zig:13`
-**Confidence**: 95%
-**Severity**: CRITICAL
+### 2. Thread Management Bug in Parallel Download
+**File**: `src/download.zig`  
+**Lines**: 157-204  
+**Confidence**: 93
 
-Removing ".exe" extension without verifying string has at least 4 characters:
+**Description**: In `downloadParallel()`, if `std.Thread.spawn` fails at line 157, the error propagates up. However, threads that were already spawned in previous loop iterations are never joined, leaving them in an undefined state. The defer blocks at lines 127-136 only free memory but don't join threads.
 
+**Code Snippet**:
 ```zig
-if (std.mem.endsWith(u8, name, ".exe")) {
-    input_clean = name[0 .. name.len - 4];  // CRASH if name.len < 4!
+for (0..options.threads) |i| {
+    // ... context setup ...
+    threads[i] = try std.Thread.spawn(.{}, downloadChunk, .{&contexts[i]}); // LINE 157
+}
+
+// ... reporter loop ...
+
+for (threads) |t| {  // Never reached if spawn fails
+    t.join();
 }
 ```
 
-**Reproduction**: Pass "exe" (3 chars) or "xe" (2 chars) as binary name to remove command.
+**Impact**: If thread spawning fails (e.g., resource exhaustion), the program will have:
+- Some threads still running and accessing shared resources (file, progress_values)
+- No way to wait for them to complete
+- Potential data corruption or undefined behavior
 
-**Fix**: Check length before slicing:
+**Fix Suggestion**: 
 ```zig
-if (name.len >= 4 and std.mem.endsWith(u8, name, ".exe")) {
+for (0..options.threads) |i| {
+    // ... context setup ...
+    threads[i] = std.Thread.spawn(.{}, downloadChunk, .{&contexts[i]}) catch |err| {
+        // Join previously spawned threads before returning error
+        for (0..i) |j| threads[j].join();
+        return err;
+    };
+}
+```
+
+---
+
+## ⚠️ IMPORTANT ISSUES
+
+### 3. Case-Sensitive Binary Name Matching on Windows
+**File**: `src/remove.zig`  
+**Lines**: 11-23  
+**Confidence**: 88
+
+**Description**: The `remove` function compares binary names using `std.mem.eql(u8)`, which is case-sensitive. On Windows, file systems are typically case-insensitive (NTFS), so users could have installed a binary with one case (e.g., "gh") but try to remove it with a different case (e.g., "GH" or "Gh"), which will fail.
+
+**Code Snippet**:
+```zig
+var input_clean = name;
+if (std.mem.endsWith(u8, name, ".exe")) {
     input_clean = name[0 .. name.len - 4];
 }
-```
 
----
-
-### 3. Out-of-bounds memory access - Another instance
-**File**: `src/remove.zig:18-19`
-**Confidence**: 95%
-**Severity**: CRITICAL
-
-Same issue with `remote_clean` - slicing without length verification:
-
-```zig
-if (std.mem.endsWith(u8, remote_clean, ".exe")) {
-    remote_clean = remote_clean[0..remote_clean.len-4];  // CRASH if len < 4!
+// ... inside iterator ...
+if (std.mem.eql(u8, remote_clean, input_clean)) {  // Case-sensitive!
+    bin_to_remove = entry.value_ptr.*;
+    key_to_remove = entry.key_ptr.*;
+    break;
 }
 ```
 
-**Fix**: Same length check as above.
+**Comparison**: The `pin` and `unpin` functions have the same issue.
+
+**Impact**: Users on Windows may be unable to remove/pin/unpin binaries due to case mismatches. The error message "Binary 'X' not found in managed list" would be confusing.
+
+**Fix Suggestion**: On Windows, convert both strings to lowercase (or uppercase) before comparison. Alternatively, use a case-insensitive comparison function.
 
 ---
 
-### 4. Memory leak - prepareDownloadPath never freed
-**File**: `src/install.zig:73-76`
-**Confidence**: 90%
-**Severity**: CRITICAL
+### 4. Duplicate Binary Entries Due to Path-Based Keys
+**File**: `src/install.zig`  
+**Lines**: 214-222  
+**Confidence**: 85
 
-`download_path` is allocated but never freed:
+**Description**: The `finalizeInstall` function stores binary entries in the config using the full **file path** as the key (`conf.bins.put(new_bin.path, new_bin)`), not the remote name. This means:
+1. Reinstalling the same binary creates a new entry with a different path (e.g., due to version change)
+2. Multiple entries for the same logical binary can exist
+3. The `remove` function only removes the **first** matching entry by remote name
+4. Orphaned entries accumulate over time
 
+**Code Snippet**:
 ```zig
-const download_path = try prepareDownloadPath(allocator, conf, asset_name, io);
-try performDownload(allocator, &client, download_url, download_path, io, conf.download_threads);
-try checksum_mod.verify(allocator, &client, release, asset_name, download_path, io);
-try finalizeInstall(allocator, conf, env, io, download_path, url, repo, tag_name, "github", options.alias);
-// download_path NEVER FREED!
+var new_bin = config.Binary{
+    .path = try allocator.dupe(u8, final_bin_path),
+    .remote_name = try allocator.dupe(u8, install_name),
+    .version = try allocator.dupe(u8, version),
+    .url = try allocator.dupe(u8, url),
+    .provider = try allocator.dupe(u8, provider_name),
+};
+try conf.bins.put(new_bin.path, new_bin);  // PATH is the key!
 ```
 
-**Impact**: Every installation leaks memory equal to the cache path length.
+**Impact**:
+- Users may have multiple versions of the same binary in their config
+- The `remove` command only removes one entry (the first found)
+- `prune` can clean up orphaned entries, but users might not be aware to run it
+- Config file grows unnecessarily large
 
-**Fix**: Add `defer allocator.free(download_path)` after allocation.
+**Fix Suggestion**: Use `remote_name` (or `remote_name` + some unique identifier) as the key instead of the full path. Or check if an entry with the same `remote_name` already exists and update it instead of creating a new one.
 
 ---
 
-### 5. Memory leak - extractArchive return value
-**File**: `src/install.zig:205`
-**Confidence**: 90%
-**Severity**: CRITICAL
+### 5. Error Handling Gap in Ensure Command
+**File**: `src/ensure.zig`  
+**Lines**: 11-16  
+**Confidence**: 82
 
-The return value from `extract_mod.extractArchive` is leaked:
+**Description**: The `ensure` function catches `error.FileNotFound` to reinstall missing binaries, but silently ignores other errors (e.g., permission denied, invalid path). This means binaries with filesystem issues won't be detected or reported.
 
+**Code Snippet**:
 ```zig
-final_bin_path = try extract_mod.extractArchive(allocator, download_path, install_path_dir, install_name, io);
-// final_bin_path is stored in new_bin.path but allocated separately
+const f = std.Io.Dir.openFileAbsolute(io, bin.path, .{}) catch |err| {
+    if (err == error.FileNotFound) {
+        std.log.info("Binary {s} missing at {s}, reinstalling...", .{ bin.remote_name, bin.path });
+        try install.install(allocator, conf, bin.url, env, io, .{ .alias = bin.remote_name });
+    }
+    continue;  // Silently ignores other errors!
+};
 ```
 
-Then at line 215:
+**Impact**: If a binary has permission issues, corrupted filesystem, or the path is invalid, the user won't be informed. The binary won't work, but `ensure` reports success (or at least doesn't report failure).
+
+**Fix Suggestion**: Log warnings for non-FileNotFound errors:
 ```zig
-.path = try allocator.dupe(u8, final_bin_path),  // DUPLICATES the path!
-```
-
-The original `final_bin_path` from `extractArchive` is leaked.
-
-**Impact**: Every archive extraction leaks the extracted binary path memory.
-
-**Fix**: Add `defer allocator.free(final_bin_path)` after line 205.
-
----
-
-### 6. Potential crash - URL parsing without validation
-**File**: `src/update.zig:70`
-**Confidence**: 88%
-**Severity**: CRITICAL
-
-When removing @ tag from repo name, no check if @ exists:
-
-```zig
-repo = it.next().?;  // unwrap
-if (std.mem.indexOfScalar(u8, repo, '@')) |at| repo = repo[0..at];
-```
-
-Same pattern repeated at lines 80, 90 (GitLab and Codeberg).
-
-**Impact**: Malformed URLs or unusual repo names could cause panics.
-
-**Fix**: Add proper error handling:
-```zig
-repo = it.next() orelse return error.InvalidURL;
+const f = std.Io.Dir.openFileAbsolute(io, bin.path, .{}) catch |err| {
+    if (err == error.FileNotFound) {
+        std.log.info("Binary {s} missing at {s}, reinstalling...", .{ bin.remote_name, bin.path });
+        try install.install(allocator, conf, bin.url, env, io, .{ .alias = bin.remote_name });
+    } else {
+        std.log.warn("Cannot access {s}: {}. Skipping.", .{ bin.path, err });
+    }
+    continue;
+};
 ```
 
 ---
 
-## Important Bugs (2)
+## 📊 Summary
 
-### 7. Inefficient duplicate function call
-**File**: `src/install.zig:66-67`
-**Confidence**: 85%
-**Severity**: IMPORTANT
-
-`selectBestAsset` is called twice - once to score assets, once to get the selected asset:
-
-```zig
-_ = try github.selectBestAsset(allocator, release); // Score them
-const asset_val = if (options.interactive) try selectGitHubAssetInteractively(release.assets, io) else (try github.selectBestAsset(allocator, release)) orelse return error.NoAssetFound;
-```
-
-**Impact**: Double the work for asset selection. Leaks memory from the first call's allocations.
-
-**Fix**: Call once, store result, use it:
-```zig
-const best_asset_opt = try github.selectBestAsset(allocator, release);
-const asset_val = if (options.interactive)
-    try selectGitHubAssetInteractively(release.assets, io)
-else
-    best_asset_opt orelse return error.NoAssetFound;
-```
-
-Also affects:
-- GitLab provider at lines 80-81
-- Codeberg provider at lines 93-94
+| Severity | Count | Issues |
+|----------|-------|--------|
+| **Critical (91-100)** | 2 | Memory leak in github.zig, Thread management bug in download.zig |
+| **Important (80-90)** | 3 | Case sensitivity on Windows, Duplicate binary entries, Error handling in ensure.zig |
+| **Total High-Confidence Issues** | **5** | |
 
 ---
 
-### 8. Code duplication - Interactive asset selection 3×
-**File**: `src/install.zig:107-183`
-**Confidence**: 90%
-**Severity**: IMPORTANT
+## ⏭️ Skipped Issues
 
-Three nearly identical functions for interactive asset selection:
-- `selectGitHubAssetInteractively` (lines 107-131)
-- `selectGitLabAssetInteractively` (lines 133-157)
-- `selectCodebergAssetInteractively` (lines 159-183)
-
-**Impact**: Maintenance burden - any fix to one must be replicated 3×. Bug risk from drift.
-
-**Fix**: Create a generic template function or use type parameters.
-
----
-
-### 9. Memory safety - Stack buffer truncation for long filenames
-**File**: `src/extract.zig:91-95`
-**Confidence**: 80%
-**Severity**: IMPORTANT
-
-Using a fixed-size stack buffer with `@min` for case conversion, but not handling cases where name exceeds buffer size:
-
-```zig
-var lower_name_buf: [256]u8 = undefined;
-const actual_len = @min(name.len, 256);
-const lower_name = std.ascii.lowerString(lower_name_buf[0..actual_len], name[0..actual_len]);
-```
-
-If `name.len > 256`, only the first 256 chars are lowercased. This causes incorrect matching.
-
-**Impact**: May fail to correctly identify the best binary in large archives with long paths.
-
-**Fix**: Either use a heap-allocated buffer for the full string, or use case-insensitive comparison that doesn't require allocation.
-
----
-
-## Summary
-
-**Total Bugs Found**: 9
-- Critical: 6
-- Important: 3
-
-**Quick Wins** (highest impact, lowest effort):
-1. Add `defer allocator.free()` for JSON parse result (github.zig:58-59)
-2. Add length checks before `.exe` trimming in remove.zig (lines 13, 18-19)
-3. Fix URL parsing null checks in update.zig (lines 70, 80, 90)
-
-These three fixes would address immediate crash risks and memory leaks.
+Rate limit command issues were excluded from this bug hunt per user request.
