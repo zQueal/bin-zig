@@ -121,12 +121,66 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    // Test: Config
+    const config_mod = b.createModule(.{
+        .root_source_file = b.path("src/config.zig"),
+        .target = target,
+    });
+    const test_config_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests/test_config.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "config", .module = config_mod },
+        },
+    });
+    const test_config = b.addTest(.{
+        .root_module = test_config_mod,
+    });
+    const run_test_config = b.addRunArtifact(test_config);
+
+    // Test: Providers
+    const install_mod = b.createModule(.{
+        .root_source_file = b.path("src/install.zig"),
+        .target = target,
+    });
+    const test_providers_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests/test_providers.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "install", .module = install_mod },
+        },
+    });
+    const test_providers = b.addTest(.{
+        .root_module = test_providers_mod,
+    });
+    const run_test_providers = b.addRunArtifact(test_providers);
+
+    // Test: Checksum
+    const checksum_mod = b.createModule(.{
+        .root_source_file = b.path("src/checksum.zig"),
+        .target = target,
+    });
+    const test_checksum_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests/test_checksum.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "checksum", .module = checksum_mod },
+        },
+    });
+    const test_checksum = b.addTest(.{
+        .root_module = test_checksum_mod,
+    });
+    const run_test_checksum = b.addRunArtifact(test_checksum);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_test_config.step);
+    test_step.dependOn(&run_test_providers.step);
+    test_step.dependOn(&run_test_checksum.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
