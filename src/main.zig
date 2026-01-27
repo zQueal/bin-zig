@@ -8,10 +8,11 @@ const ensure_cmd = @import("ensure.zig");
 const pin_cmd = @import("pin.zig");
 const prune_cmd = @import("prune.zig");
 const clean_cmd = @import("clean.zig");
+const info_cmd = @import("info.zig");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    
+
     // Get args iterator using the Init struct's args
     var args_iter = try init.minimal.args.iterateAllocator(allocator);
     defer args_iter.deinit();
@@ -65,15 +66,15 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (url == null) {
-             std.log.err("Usage: bin install <url> [--as <name>] [-a]", .{});
-             return;
+            std.log.err("Usage: bin install <url> [--as <name>] [-a]", .{});
+            return;
         }
-        
+
         try install_cmd.install(allocator, &conf, url.?, init.minimal.environ, init.io, .{ .alias = alias, .interactive = interactive });
     } else if (std.mem.eql(u8, command, "update")) {
         var target: ?[]const u8 = null;
         var all_flag = false;
-        
+
         while (args_iter.next()) |arg| {
             if (std.mem.eql(u8, arg, "--all")) {
                 all_flag = true;
@@ -95,16 +96,24 @@ pub fn main(init: std.process.Init) !void {
         try ensure_cmd.ensure(allocator, &conf, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "pin")) {
         const name = args_iter.next();
-        if (name == null) { std.log.err("Usage: bin pin <name>", .{}); return; }
+        if (name == null) {
+            std.log.err("Usage: bin pin <name>", .{});
+            return;
+        }
         try pin_cmd.pin(allocator, &conf, name.?, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "unpin")) {
         const name = args_iter.next();
-        if (name == null) { std.log.err("Usage: bin unpin <name>", .{}); return; }
+        if (name == null) {
+            std.log.err("Usage: bin unpin <name>", .{});
+            return;
+        }
         try pin_cmd.unpin(allocator, &conf, name.?, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "prune")) {
         try prune_cmd.prune(allocator, &conf, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "clean")) {
         try clean_cmd.clean(allocator, &conf, init.minimal.environ, init.io);
+    } else if (std.mem.eql(u8, command, "info")) {
+        try info_cmd.info(allocator, &conf, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
         printHelp();
     } else if (std.mem.eql(u8, command, "-v") or std.mem.eql(u8, command, "--version")) {
@@ -130,6 +139,7 @@ fn printHelp() void {
         \\  unpin <name>     Unlock binary
         \\  prune            Remove dead entries from config
         \\  clean            Clear download/extraction cache
+        \\  info             Show API rate limit information
         \\
         \\Flags:
         \\  -h, --help       Display this help and exit

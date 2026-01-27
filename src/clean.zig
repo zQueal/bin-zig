@@ -27,12 +27,22 @@ pub fn clean(allocator: std.mem.Allocator, conf: *config.Config, env: std.proces
 
         if (entry.kind == .directory) {
             // Recursive delete for directories like tmp_extract
-            deleteDirRecursive(full_path, io) catch |err| {
+            const dir_size = deleteDirRecursive(full_path, io) catch |err| {
                 std.log.warn("Could not delete directory {s}: {}", .{ entry.name, err });
                 continue;
             };
+            total_size += dir_size;
         } else {
-            const stat = try std.Io.Dir.statFileAbsolute(io, full_path);
+            const file = std.Io.Dir.openFileAbsolute(io, full_path, .{}) catch |err| {
+                std.log.warn("Could not open file {s}: {}", .{ entry.name, err });
+                continue;
+            };
+            const stat = file.stat(io) catch {
+                file.close(io);
+                std.log.warn("Could not stat file {s}", .{entry.name});
+                continue;
+            };
+            file.close(io);
             total_size += stat.size;
             std.Io.Dir.deleteFileAbsolute(io, full_path) catch |err| {
                 std.log.warn("Could not delete file {s}: {}", .{ entry.name, err });
@@ -49,20 +59,34 @@ pub fn clean(allocator: std.mem.Allocator, conf: *config.Config, env: std.proces
     }
 }
 
-fn deleteDirRecursive(path: []const u8, io: std.Io) !void {
+fn deleteDirRecursive(path: []const u8, io: std.Io) !u64 {
     var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
     defer dir.close(io);
 
+    var total_size: u64 = 0;
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         var sub_path_buf: [4096]u8 = undefined;
         const sub_path = try std.fmt.bufPrint(&sub_path_buf, "{s}/{s}", .{ path, entry.name });
 
         if (entry.kind == .directory) {
-            try deleteDirRecursive(sub_path, io);
+            total_size += try deleteDirRecursive(sub_path, io);
         } else {
+            const file = std.Io.Dir.openFileAbsolute(io, sub_path, .{}) catch |err| {
+                std.log.warn("Could not open file {s}: {}", .{ entry.name, err });
+                try std.Io.Dir.deleteFileAbsolute(io, sub_path);
+                continue;
+            };
+            const stat = file.stat(io) catch {
+                file.close(io);
+                try std.Io.Dir.deleteFileAbsolute(io, sub_path);
+                continue;
+            };
+            file.close(io);
+            total_size += stat.size;
             try std.Io.Dir.deleteFileAbsolute(io, sub_path);
         }
     }
     try std.Io.Dir.deleteDirAbsolute(io, path);
+    return total_size;
 }
