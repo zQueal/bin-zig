@@ -51,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
         var url: ?[]const u8 = null;
         var alias: ?[]const u8 = null;
         var interactive = false;
+        var provider: ?install_cmd.Provider = null;
 
         while (args_iter.next()) |arg| {
             if (std.mem.eql(u8, arg, "--as")) {
@@ -60,17 +61,27 @@ pub fn main(init: std.process.Init) !void {
                 };
             } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--all-assets")) {
                 interactive = true;
+            } else if (std.mem.eql(u8, arg, "--provider")) {
+                const prov_str = args_iter.next() orelse {
+                    std.log.err("--provider requires a type (github, gitlab, codeberg)", .{});
+                    return;
+                };
+                provider = if (std.mem.eql(u8, prov_str, "github")) .github else if (std.mem.eql(u8, prov_str, "gitlab")) .gitlab else if (std.mem.eql(u8, prov_str, "codeberg")) .codeberg else {
+                    std.log.err("Unknown provider: {s}", .{prov_str});
+                    std.log.err("Supported providers: github, gitlab, codeberg", .{});
+                    return;
+                };
             } else if (url == null) {
                 url = arg;
             }
         }
 
         if (url == null) {
-            std.log.err("Usage: bin install <url> [--as <name>] [-a]", .{});
+            std.log.err("Usage: bin install <url> [--as <name>] [-a] [--provider <type>] [path]", .{});
             return;
         }
 
-        try install_cmd.install(allocator, &conf, url.?, init.minimal.environ, init.io, .{ .alias = alias, .interactive = interactive });
+        try install_cmd.install(allocator, &conf, url.?, init.minimal.environ, init.io, .{ .alias = alias, .interactive = interactive, .provider = provider });
     } else if (std.mem.eql(u8, command, "update")) {
         var target: ?[]const u8 = null;
         var all_flag = false;
@@ -130,18 +141,22 @@ fn printHelp() void {
         \\
         \\Commands:
         \\  install <url>    Install from GitHub, GitLab, or Codeberg
+        \\                   URL formats: https://, domain (github.com/), or short (user/repo)
         \\                   Flags: --as <name> to rename binary
-        \\  update           Update installed binaries
-        \\  list             List installed binaries
-        \\  remove <name>    Remove installed binary
+        \\                          -a, --all-assets to interactively select assets
+        \\                          --provider <type> for explicit provider (github/gitlab/codeberg)
+        \\  update [name]    Update installed binaries (specific or all)
+        \\                   Flags: --all to update all binaries
+        \\  list             List installed binaries and versions
+        \\  remove <name>    Remove installed binary (works with .exe)
         \\  ensure           Verify and reinstall missing binaries
         \\  pin <name>       Lock binary to current version
-        \\  unpin <name>     Unlock binary
-        \\  prune            Remove dead entries from config
+        \\  unpin <name>     Unlock binary for updates
+        \\  prune            Remove dead entries from configuration
         \\  clean            Clear download/extraction cache
         \\  info             Show API rate limit information
         \\
-        \\Flags:
+        \\Global Flags:
         \\  -h, --help       Display this help and exit
         \\  -v, --version    Output version information and exit
         \\

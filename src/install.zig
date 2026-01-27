@@ -8,16 +8,42 @@ const extract_mod = @import("extract.zig");
 const advanced_download = @import("download.zig");
 const checksum_mod = @import("checksum.zig");
 
-const Provider = enum {
+pub const Provider = enum {
     github,
     gitlab,
     codeberg,
 
-    pub fn fromUrl(url: []const u8) !Provider {
+    pub fn fromUrl(url: []const u8, explicit_provider: ?Provider) !Provider {
+        // If explicit provider provided, use it
+        if (explicit_provider) |prov| return prov;
+
+        // Auto-detect from full URL (https://)
+        if (std.mem.indexOf(u8, url, "https://github.com/") != null) return .github;
+        if (std.mem.indexOf(u8, url, "https://gitlab.com/") != null) return .gitlab;
+        if (std.mem.indexOf(u8, url, "https://codeberg.org/") != null) return .codeberg;
+
+        // Auto-detect from domain format (github.com/)
         if (std.mem.indexOf(u8, url, "github.com/") != null) return .github;
         if (std.mem.indexOf(u8, url, "gitlab.com/") != null) return .gitlab;
         if (std.mem.indexOf(u8, url, "codeberg.org/") != null) return .codeberg;
-        return error.UnsupportedProvider;
+
+        // Validate user/repo format (exactly one slash)
+        var slash_count: usize = 0;
+        var it = std.mem.splitScalar(u8, url, '/');
+        var parts: [2][]const u8 = undefined;
+        while (it.next()) |part| {
+            if (slash_count < 2) {
+                parts[slash_count] = part;
+            }
+            slash_count += 1;
+        }
+
+        if (slash_count != 2 or parts[0].len == 0 or parts[1].len == 0) {
+            return error.InvalidURL;
+        }
+
+        // Default to github for "user/repo" format
+        return .github;
     }
 
     pub fn prefix(self: Provider) []const u8 {
@@ -32,17 +58,34 @@ const Provider = enum {
 pub const InstallOptions = struct {
     alias: ?[]const u8 = null,
     interactive: bool = false,
+    install_path: ?[]const u8 = null,
+    provider: ?Provider = null,
 };
 
 pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const u8, env: std.process.Environ, io: std.Io, options: InstallOptions) !void {
     var client = std.http.Client{ .allocator = allocator, .io = io };
     defer client.deinit();
 
-    const provider = try Provider.fromUrl(url);
+    const provider = try Provider.fromUrl(url, options.provider);
     const pref = provider.prefix();
-    const idx = std.mem.indexOf(u8, url, pref).?;
-    
-    const rest = url[idx + pref.len ..];
+
+    var rest: []const u8 = undefined;
+
+    // Handle full URL (https://)
+    if (std.mem.indexOf(u8, url, "https://") != null) {
+        const idx = std.mem.indexOf(u8, url, pref).?;
+        rest = url[idx + pref.len ..];
+    }
+    // Handle domain format (github.com/) or short format (user/repo)
+    else if (std.mem.indexOf(u8, url, pref) != null) {
+        const idx = std.mem.indexOf(u8, url, pref).?;
+        rest = url[idx + pref.len ..];
+    }
+    // Short format (user/repo)
+    else {
+        rest = url;
+    }
+
     var it = std.mem.splitScalar(u8, rest, '/');
     const user = it.next() orelse return error.InvalidURL;
     var repo_full = it.next() orelse return error.InvalidURL;
@@ -65,11 +108,11 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const 
             const release = try github.fetchRelease(allocator, &client, user, repo, tag, conf.tokens.github);
             _ = try github.selectBestAsset(allocator, release); // Score them
             const asset_val = if (options.interactive) try selectGitHubAssetInteractively(release.assets, io) else (try github.selectBestAsset(allocator, release)) orelse return error.NoAssetFound;
-            
+
             tag_name = try allocator.dupe(u8, release.tag_name);
             asset_name = try allocator.dupe(u8, asset_val.name);
             download_url = try allocator.dupe(u8, asset_val.browser_download_url);
-            
+
             const download_path = try prepareDownloadPath(allocator, conf, asset_name, io);
             try performDownload(allocator, &client, download_url, download_path, io, conf.download_threads);
             try checksum_mod.verify(allocator, &client, release, asset_name, download_path, io);
@@ -83,7 +126,7 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const 
             tag_name = try allocator.dupe(u8, release.tag_name);
             asset_name = try allocator.dupe(u8, asset_val.name);
             download_url = try allocator.dupe(u8, asset_val.browser_download_url);
-            
+
             const download_path = try prepareDownloadPath(allocator, conf, asset_name, io);
             try performDownload(allocator, &client, download_url, download_path, io, conf.download_threads);
             try finalizeInstall(allocator, conf, env, io, download_path, url, repo, tag_name, "gitlab", options.alias);
@@ -108,7 +151,7 @@ fn selectGitHubAssetInteractively(assets: []github.Asset, io: std.Io) !github.As
     var stdout_buf: [1]u8 = undefined;
     var stdout_file = std.Io.File.stdout();
     var stdout = stdout_file.writer(io, &stdout_buf);
-    
+
     var stdin_buf: [1]u8 = undefined;
     var stdin_file = std.Io.File.stdin();
     var stdin = stdin_file.reader(io, &stdin_buf);
@@ -125,7 +168,7 @@ fn selectGitHubAssetInteractively(assets: []github.Asset, io: std.Io) !github.As
     const line = (try stdin.interface.takeDelimiter('\n')) orelse return error.InvalidInput;
     const trimmed = std.mem.trim(u8, line, " \r\t");
     const choice = try std.fmt.parseInt(usize, trimmed, 10);
-    
+
     if (choice < 1 or choice > assets.len) return error.InvalidChoice;
     return assets[choice - 1];
 }
@@ -134,7 +177,7 @@ fn selectGitLabAssetInteractively(assets: []gitlab.Asset, io: std.Io) !gitlab.As
     var stdout_buf: [1]u8 = undefined;
     var stdout_file = std.Io.File.stdout();
     var stdout = stdout_file.writer(io, &stdout_buf);
-    
+
     var stdin_buf: [1]u8 = undefined;
     var stdin_file = std.Io.File.stdin();
     var stdin = stdin_file.reader(io, &stdin_buf);
@@ -151,7 +194,7 @@ fn selectGitLabAssetInteractively(assets: []gitlab.Asset, io: std.Io) !gitlab.As
     const line = (try stdin.interface.takeDelimiter('\n')) orelse return error.InvalidInput;
     const trimmed = std.mem.trim(u8, line, " \r\t");
     const choice = try std.fmt.parseInt(usize, trimmed, 10);
-    
+
     if (choice < 1 or choice > assets.len) return error.InvalidChoice;
     return assets[choice - 1];
 }
@@ -160,7 +203,7 @@ fn selectCodebergAssetInteractively(assets: []codeberg.Asset, io: std.Io) !codeb
     var stdout_buf: [1]u8 = undefined;
     var stdout_file = std.Io.File.stdout();
     var stdout = stdout_file.writer(io, &stdout_buf);
-    
+
     var stdin_buf: [1]u8 = undefined;
     var stdin_file = std.Io.File.stdin();
     var stdin = stdin_file.reader(io, &stdin_buf);
@@ -177,7 +220,7 @@ fn selectCodebergAssetInteractively(assets: []codeberg.Asset, io: std.Io) !codeb
     const line = (try stdin.interface.takeDelimiter('\n')) orelse return error.InvalidInput;
     const trimmed = std.mem.trim(u8, line, " \r\t");
     const choice = try std.fmt.parseInt(usize, trimmed, 10);
-    
+
     if (choice < 1 or choice > assets.len) return error.InvalidChoice;
     return assets[choice - 1];
 }
@@ -189,14 +232,14 @@ fn prepareDownloadPath(allocator: std.mem.Allocator, conf: *config.Config, asset
 }
 
 fn performDownload(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, dest: []const u8, io: std.Io, threads: u32) !void {
-    std.log.info("Downloading to {s}...", .{ dest });
+    std.log.info("Downloading to {s}...", .{dest});
     try advanced_download.download(allocator, client, url, dest, io, .{ .threads = threads });
 }
 
 fn finalizeInstall(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.Environ, io: std.Io, download_path: []const u8, url: []const u8, repo: []const u8, version: []const u8, provider_name: []const u8, alias: ?[]const u8) !void {
     const install_path_dir = conf.bin_dir;
     std.Io.Dir.createDirAbsolute(io, install_path_dir, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
-    
+
     var final_bin_path: []const u8 = "";
     const asset_name = std.fs.path.basename(download_path);
     const install_name = alias orelse repo;
@@ -210,7 +253,7 @@ fn finalizeInstall(allocator: std.mem.Allocator, conf: *config.Config, env: std.
         try utils.copyFileAbsolute(io, download_path, dest_path);
         final_bin_path = dest_path;
     }
-    
+
     var new_bin = config.Binary{
         .path = try allocator.dupe(u8, final_bin_path),
         .remote_name = try allocator.dupe(u8, install_name),
@@ -220,6 +263,6 @@ fn finalizeInstall(allocator: std.mem.Allocator, conf: *config.Config, env: std.
     };
     try conf.bins.put(new_bin.path, new_bin);
     try config.save(conf, env, io);
-    
+
     std.log.info("Successfully installed {s} version {s}", .{ install_name, version });
 }

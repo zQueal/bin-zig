@@ -43,7 +43,7 @@ The executable will be located in `zig-out/bin/bin`.
 
 | Command                     | Description                                | Example                                  |
 | --------------------------- | ------------------------------------------ | ---------------------------------------- |
-| `bin install <url>`         | Install binary with optional alias/assets  | `bin install cli/cli --as gh -a`         |
+| `bin install <url>`         | Install binary from GitHub, GitLab, or Codeberg  | `bin install cli/cli --as gh -a`         |
 | `bin list`                  | List installed binaries and versions       | `bin list`                               |
 | `bin update`                | Check all binaries for available updates   | `bin update`                             |
 | `bin update <name>`         | Update a specific binary                   | `bin update gh`                          |
@@ -52,10 +52,79 @@ The executable will be located in `zig-out/bin/bin`.
 | `bin ensure`                | Reinstall any missing binaries             | `bin ensure`                             |
 | `bin pin <name>`            | Lock binary to its current version         | `bin pin fzf`                            |
 | `bin unpin <name>`          | Unlock binary for updates                  | `bin unpin fzf`                          |
+| `bin info`                  | Show API rate limit information            | `bin info`                               |
 | `bin prune`                 | Remove dead entries from configuration     | `bin prune`                              |
 | `bin clean`                 | Clear download/extraction cache            | `bin clean`                              |
 
 **Tip**: You can install specific versions using the `@` syntax: `bin install github.com/cli/cli@v2.40.1`.
+
+## 🚩 Flags Reference
+
+### Install Command Flags
+
+| Flag            | Arguments | Description |
+| --------------- | --------- | ----------- |
+| `--as`          | `<name>`  | Install the binary with a custom alias name instead of using the repository name |
+| `-a`            | -         | Interactive mode - prompts you to manually select from available assets when multiple are found |
+| `--all-assets`  | -         | Same as `-a` - interactive mode for asset selection |
+| `--provider`    | `<type>`  | Explicitly specify provider: github, gitlab, or codeberg |
+
+**URL Formats**:
+You can use three different URL formats when installing:
+
+1. **Full URL** (auto-detects provider):
+   ```bash
+   bin install https://github.com/cli/cli
+   bin install https://gitlab.com/gitlab-org/cli
+   bin install https://codeberg.org/mergiraf/mergiraf
+   ```
+
+2. **Domain format** (auto-detects provider):
+   ```bash
+   bin install github.com/cli/cli
+   bin install gitlab.com/gitlab-org/cli
+   bin install codeberg.org/mergiraf/mergiraf
+   ```
+
+3. **Short format** (defaults to GitHub):
+   ```bash
+   bin install cli/cli
+   ```
+
+4. **Short format with explicit provider**:
+   ```bash
+   bin install --provider gitlab gitlab-org/cli
+   bin install --provider codeberg mergiraf/mergiraf
+   ```
+
+**When to use `-a` (Interactive Asset Selection)**:
+- By default, `bin-zig` automatically selects the best matching asset based on your OS and architecture
+- Use `-a` when you want to manually choose a different asset (e.g., a different architecture, build variant, or special distribution)
+- This is particularly useful when:
+  - Multiple build variants are available (e.g., static vs dynamic linking)
+  - You need a specific architecture (e.g., musl vs glibc on Linux)
+  - The automatic selection doesn't pick the asset you want
+
+**Example**:
+```bash
+# Install GitHub CLI as 'gh' and interactively select the asset
+bin install cli/cli --as gh -a
+```
+
+### Update Command Flags
+
+| Flag        | Arguments | Description |
+| ----------- | --------- | ----------- |
+| `--all`     | -         | Update all managed binaries to their latest available versions |
+
+### Global Flags
+
+| Flag               | Arguments | Description |
+| ------------------ | --------- | ----------- |
+| `-h`               | -         | Display help information and exit |
+| `--help`           | -         | Same as `-h` |
+| `-v`               | -         | Output version information and exit |
+| `--version`        | -         | Same as `-v` |
 
 ## 🔧 Configuration
 
