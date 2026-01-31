@@ -50,6 +50,10 @@ fn fetchDownloadInfo(allocator: std.mem.Allocator, client: *std.http.Client, url
     };
     var req = client.request(.GET, uri, .{
         .redirect_behavior = @enumFromInt(5),
+        .headers = .{
+            .user_agent = .{ .override = "bin-zig-cli" },
+            .connection = .{ .override = "close" },
+        },
     }) catch |err| {
         std.log.err("Failed to create HTTP request for '{s}': {}", .{ url, err });
         return err;
@@ -98,7 +102,13 @@ fn fetchDownloadInfo(allocator: std.mem.Allocator, client: *std.http.Client, url
 fn downloadStreaming(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, file: std.Io.File, io: std.Io) !void {
     _ = allocator;
     const uri = try std.Uri.parse(url);
-    var req = try client.request(.GET, uri, .{ .redirect_behavior = @enumFromInt(5) });
+    var req = try client.request(.GET, uri, .{
+        .redirect_behavior = @enumFromInt(5),
+        .headers = .{
+            .user_agent = .{ .override = "bin-zig-cli" },
+            .connection = .{ .override = "close" },
+        },
+    });
     defer req.deinit();
 
     var head_buf: [1024]u8 = undefined;
@@ -230,8 +240,13 @@ fn downloadChunk(ctx: *const Context) void {
     const range_header = std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ ctx.start, ctx.end }) catch return;
 
     var req = ctx.client.request(.GET, uri, .{
+        .redirect_behavior = @enumFromInt(5),
         .extra_headers = &[_]std.http.Header{
             .{ .name = "Range", .value = range_header },
+        },
+        .headers = .{
+            .user_agent = .{ .override = "bin-zig-cli" },
+            .connection = .{ .override = "close" },
         },
     }) catch |err| {
         std.log.err("Thread {}: request failed: {any}", .{ ctx.id, err });

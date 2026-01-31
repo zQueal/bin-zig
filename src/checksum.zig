@@ -50,7 +50,13 @@ pub fn verify(allocator: std.mem.Allocator, client: *std.http.Client, release: g
 
     // Download checksum file into memory
     const uri = try std.Uri.parse(checksum_asset.browser_download_url);
-    var req = try client.request(.GET, uri, .{ .redirect_behavior = @enumFromInt(5) });
+    var req = try client.request(.GET, uri, .{
+        .redirect_behavior = @enumFromInt(5),
+        .headers = .{
+            .user_agent = .{ .override = "bin-zig-cli" },
+            .connection = .{ .override = "close" },
+        },
+    });
     defer req.deinit();
 
     var head_buf: [1024]u8 = undefined;

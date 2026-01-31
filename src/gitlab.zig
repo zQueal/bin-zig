@@ -41,8 +41,10 @@ pub fn fetchRelease(allocator: std.mem.Allocator, client: *std.http.Client, user
 
     var req = try client.request(.GET, uri, .{
         .extra_headers = extra_headers_list.items,
+        .redirect_behavior = @enumFromInt(5),
         .headers = .{
             .user_agent = .{ .override = "bin-zig-cli" },
+            .connection = .{ .override = "close" },
         },
     });
     defer req.deinit();

@@ -14,6 +14,7 @@ pub fn info(allocator: std.mem.Allocator, conf: *config.Config, env: std.process
     _ = env;
 
     var client = std.http.Client{ .allocator = allocator, .io = io };
+    try client.ca_bundle.rescan(allocator, io, try std.Io.Clock.now(.real, io));
     defer client.deinit();
 
     var results = std.ArrayList(RateLimitInfo).empty;
@@ -83,17 +84,21 @@ fn getGithubRateLimit(allocator: std.mem.Allocator, client: *std.http.Client, to
     var extra_headers_list: std.ArrayList(std.http.Header) = .empty;
     defer extra_headers_list.deinit(allocator);
 
+    // Track Authorization header value for proper cleanup - must live until request completes
+    var auth_header_value: ?[]const u8 = null;
     if (token.len > 0) {
-        const auth_value = try std.fmt.allocPrint(allocator, "token {s}", .{token});
-        defer allocator.free(auth_value);
-        try extra_headers_list.append(allocator, .{ .name = "Authorization", .value = auth_value });
+        auth_header_value = try std.fmt.allocPrint(allocator, "token {s}", .{token});
+        try extra_headers_list.append(allocator, .{ .name = "Authorization", .value = auth_header_value.? });
     }
+    defer if (auth_header_value) |v| allocator.free(v);
     try extra_headers_list.append(allocator, .{ .name = "Accept", .value = "application/vnd.github.v3+json" });
 
     var req = try client.request(.GET, uri, .{
         .extra_headers = extra_headers_list.items,
+        .redirect_behavior = @enumFromInt(5),
         .headers = .{
             .user_agent = .{ .override = "bin-zig-cli" },
+            .connection = .{ .override = "close" },
         },
     });
     defer req.deinit();

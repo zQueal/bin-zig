@@ -36,6 +36,7 @@ pub fn update(allocator: std.mem.Allocator, conf: *config.Config, targets: ?[]co
     // Default: Check for updates
     std.log.info("Checking for updates...", .{});
     var client = std.http.Client{ .allocator = allocator, .io = io };
+    try client.ca_bundle.rescan(allocator, io, try std.Io.Clock.now(.real, io));
     defer client.deinit();
 
     var it = conf.bins.iterator();

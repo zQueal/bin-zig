@@ -28,18 +28,24 @@ pub fn fetchRelease(allocator: std.mem.Allocator, client: *std.http.Client, user
     defer allocator.free(api_url);
 
     const uri = try std.Uri.parse(api_url);
-    
+
     var extra_headers_list: std.ArrayList(std.http.Header) = .empty;
     defer extra_headers_list.deinit(allocator);
 
+    // Track Authorization header value for proper cleanup
+    var auth_header_value: ?[]const u8 = null;
     if (token.len > 0) {
-        try extra_headers_list.append(allocator, .{ .name = "Authorization", .value = try std.fmt.allocPrint(allocator, "token {s}", .{token}) });
+        auth_header_value = try std.fmt.allocPrint(allocator, "token {s}", .{token});
+        try extra_headers_list.append(allocator, .{ .name = "Authorization", .value = auth_header_value.? });
     }
-    
+    defer if (auth_header_value) |v| allocator.free(v);
+
     var req = try client.request(.GET, uri, .{
         .extra_headers = extra_headers_list.items,
+        .redirect_behavior = @enumFromInt(5),
         .headers = .{
             .user_agent = .{ .override = "bin-zig-cli" },
+            .connection = .{ .override = "close" },
         },
     });
     defer req.deinit();
@@ -107,12 +113,12 @@ pub fn selectBestAsset(allocator: std.mem.Allocator, release: Release) !?Asset {
                 score += @intCast(extensions.len - i);
                 break;
             } else if (ext.len == 0) {
-                 if (std.mem.lastIndexOfScalar(u8, name, '.') == null) {
-                     score += 5;
-                 }
+                if (std.mem.lastIndexOfScalar(u8, name, '.') == null) {
+                    score += 5;
+                }
             }
         }
-        
+
         asset.score = score;
         if (score > highest_score) {
             highest_score = score;

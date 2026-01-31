@@ -112,6 +112,7 @@ fn validateAndResolvePath(allocator: std.mem.Allocator, path: []const u8, env: s
 
 pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const u8, env: std.process.Environ, io: std.Io, options: InstallOptions) !void {
     var client = std.http.Client{ .allocator = allocator, .io = io };
+    try client.ca_bundle.rescan(allocator, io, try std.Io.Clock.now(.real, io));
     defer client.deinit();
 
     // Validate install path if provided
