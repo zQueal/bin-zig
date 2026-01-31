@@ -9,10 +9,21 @@ pub fn pin(allocator: std.mem.Allocator, conf: *config.Config, names: []const []
     for (names) |name| {
         var found = false;
         var it = conf.bins.iterator();
+
+        var input_clean = name;
+        if (std.mem.endsWith(u8, name, ".exe")) {
+            input_clean = name[0 .. name.len - 4];
+        }
+
         while (it.next()) |entry| {
-            if (std.mem.eql(u8, entry.value_ptr.remote_name, name)) {
+            var remote_clean = entry.value_ptr.remote_name;
+            if (std.mem.endsWith(u8, remote_clean, ".exe")) {
+                remote_clean = remote_clean[0 .. remote_clean.len - 4];
+            }
+
+            if (std.mem.eql(u8, remote_clean, input_clean)) {
                 entry.value_ptr.pinned = true;
-                std.log.info("Pinned {s} to version {s}", .{ name, entry.value_ptr.version });
+                std.log.info("Pinned {s} to version {s}", .{ entry.value_ptr.remote_name, entry.value_ptr.version });
                 successes += 1;
                 found = true;
                 break;
@@ -46,10 +57,21 @@ pub fn unpin(allocator: std.mem.Allocator, conf: *config.Config, names: []const 
     for (names) |name| {
         var found = false;
         var it = conf.bins.iterator();
+
+        var input_clean = name;
+        if (std.mem.endsWith(u8, name, ".exe")) {
+            input_clean = name[0 .. name.len - 4];
+        }
+
         while (it.next()) |entry| {
-            if (std.mem.eql(u8, entry.value_ptr.remote_name, name)) {
+            var remote_clean = entry.value_ptr.remote_name;
+            if (std.mem.endsWith(u8, remote_clean, ".exe")) {
+                remote_clean = remote_clean[0 .. remote_clean.len - 4];
+            }
+
+            if (std.mem.eql(u8, remote_clean, input_clean)) {
                 entry.value_ptr.pinned = false;
-                std.log.info("Unpinned {s}", .{name});
+                std.log.info("Unpinned {s}", .{entry.value_ptr.remote_name});
                 successes += 1;
                 found = true;
                 break;

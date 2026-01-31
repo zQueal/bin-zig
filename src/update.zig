@@ -17,14 +17,18 @@ pub fn update(allocator: std.mem.Allocator, conf: *config.Config, targets: ?[]co
 
     if (targets) |names| {
         for (names) |name| {
+            var found = false;
             var it = conf.bins.iterator();
             while (it.next()) |entry| {
                 if (std.mem.eql(u8, entry.value_ptr.remote_name, name)) {
                     try updateOne(allocator, conf, entry.value_ptr.*, env, io);
+                    found = true;
                     break;
                 }
             }
-            std.log.err("Binary '{s}' not found in managed list.", .{name});
+            if (!found) {
+                std.log.err("Binary '{s}' not found in managed list.", .{name});
+            }
         }
         return;
     }
@@ -69,7 +73,7 @@ fn getLatestVersion(allocator: std.mem.Allocator, client: *std.http.Client, bin:
         var it = std.mem.splitScalar(u8, rest, '/');
         user = it.next().?;
         repo = it.next().?;
-        if (std.mem.indexOfScalar(u8, repo, '@')) |at| repo = repo[0..at];
+        if (std.mem.lastIndexOfScalar(u8, repo, '@')) |at| repo = repo[0..at];
         const release = try github.fetchRelease(allocator, client, user, repo, "", conf.tokens.github);
         return try allocator.dupe(u8, release.tag_name);
     } else if (std.mem.eql(u8, bin.provider, "gitlab")) {
@@ -79,7 +83,7 @@ fn getLatestVersion(allocator: std.mem.Allocator, client: *std.http.Client, bin:
         var it = std.mem.splitScalar(u8, rest, '/');
         user = it.next().?;
         repo = it.next().?;
-        if (std.mem.indexOfScalar(u8, repo, '@')) |at| repo = repo[0..at];
+        if (std.mem.lastIndexOfScalar(u8, repo, '@')) |at| repo = repo[0..at];
         const release = try gitlab.fetchRelease(allocator, client, user, repo, "", conf.tokens.gitlab);
         return try allocator.dupe(u8, release.tag_name);
     } else if (std.mem.eql(u8, bin.provider, "codeberg")) {
@@ -89,7 +93,7 @@ fn getLatestVersion(allocator: std.mem.Allocator, client: *std.http.Client, bin:
         var it = std.mem.splitScalar(u8, rest, '/');
         user = it.next().?;
         repo = it.next().?;
-        if (std.mem.indexOfScalar(u8, repo, '@')) |at| repo = repo[0..at];
+        if (std.mem.lastIndexOfScalar(u8, repo, '@')) |at| repo = repo[0..at];
         const release = try codeberg.fetchRelease(allocator, client, user, repo, "", conf.tokens.codeberg);
         return try allocator.dupe(u8, release.tag_name);
     }

@@ -2,8 +2,8 @@ const std = @import("std");
 const utils = @import("utils.zig");
 
 pub fn extractArchive(allocator: std.mem.Allocator, archive_path: []const u8, dest_dir: []const u8, repo_name: []const u8, io: std.Io) ![]const u8 {
-    std.log.info("Extracting {s}...", .{ archive_path });
-    
+    std.log.info("Extracting {s}...", .{archive_path});
+
     const extraction_dir = try std.fs.path.join(allocator, &[_][]const u8{ std.fs.path.dirname(archive_path) orelse ".", "tmp_extract" });
     std.Io.Dir.createDirAbsolute(io, extraction_dir, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
 
@@ -24,7 +24,7 @@ pub fn extractArchive(allocator: std.mem.Allocator, archive_path: []const u8, de
         var decompressor = std.compress.flate.Decompress.init(&reader.interface, .gzip, decompress_buf);
         try std.tar.pipeToFileSystem(io, ext_dir_handle, &decompressor.reader, .{});
     } else if (std.mem.endsWith(u8, archive_path, ".tar.xz")) {
-        const xz_buf = try allocator.alloc(u8, 4096); 
+        const xz_buf = try allocator.alloc(u8, 4096);
         defer allocator.free(xz_buf);
         var decompressor = try std.compress.xz.Decompress.init(&reader.interface, allocator, xz_buf);
         defer decompressor.deinit();
@@ -43,8 +43,8 @@ pub fn extractArchive(allocator: std.mem.Allocator, archive_path: []const u8, de
     } else if (std.mem.endsWith(u8, archive_path, ".tar")) {
         try std.tar.pipeToFileSystem(io, ext_dir_handle, &reader.interface, .{});
     } else {
-         // Fallback to shell tar
-         const run_result = try std.process.run(allocator, io, .{
+        // Fallback to shell tar
+        const run_result = try std.process.run(allocator, io, .{
             .argv = &[_][]const u8{ "tar", "-xf", archive_path, "-C", extraction_dir },
         });
         if (run_result.term != .exited or run_result.term.exited != 0) {
@@ -54,13 +54,23 @@ pub fn extractArchive(allocator: std.mem.Allocator, archive_path: []const u8, de
     }
 
     const best_entry = try findBestBinary(allocator, extraction_dir, repo_name, io);
-    if (best_entry == null) return error.NoBinaryInArchive;
+    if (best_entry == null) {
+        // Clean up extraction directory before returning error
+        deleteDirRecursive(extraction_dir, io) catch {};
+        return error.NoBinaryInArchive;
+    }
+    defer allocator.free(best_entry.?);
 
     const builtin = @import("builtin");
     const bin_name = if (builtin.os.tag == .windows and !std.mem.endsWith(u8, repo_name, ".exe")) try std.fmt.allocPrint(allocator, "{s}.exe", .{repo_name}) else try allocator.dupe(u8, repo_name);
     const final_path = try std.fs.path.join(allocator, &[_][]const u8{ dest_dir, bin_name });
-    
+
     try utils.copyFileAbsolute(io, best_entry.?, final_path);
+
+    // Clean up extraction directory after successful copy
+    deleteDirRecursive(extraction_dir, io) catch |err| {
+        std.log.warn("Could not clean up extraction directory: {}", .{err});
+    };
 
     return final_path;
 }
@@ -78,8 +88,9 @@ fn findBestBinary(allocator: std.mem.Allocator, dir_path: []const u8, repo_name:
     while (try it.next(io)) |entry| {
         if (entry.kind == .directory) {
             const sub_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, entry.name });
+            defer allocator.free(sub_path);
             if (try findBestBinary(allocator, sub_path, repo_name, io)) |found| {
-                 return found; 
+                return found;
             }
             continue;
         }
@@ -87,7 +98,7 @@ fn findBestBinary(allocator: std.mem.Allocator, dir_path: []const u8, repo_name:
         if (entry.kind == .file) {
             var score: i32 = 0;
             const name = entry.name;
-            
+
             var lower_name_buf: [256]u8 = undefined;
             const actual_len = @min(name.len, 256);
             const lower_name = std.ascii.lowerString(lower_name_buf[0..actual_len], name[0..actual_len]);
@@ -108,4 +119,22 @@ fn findBestBinary(allocator: std.mem.Allocator, dir_path: []const u8, repo_name:
         }
     }
     return best_file;
+}
+
+fn deleteDirRecursive(path: []const u8, io: std.Io) !void {
+    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        var sub_path_buf: [4096]u8 = undefined;
+        const sub_path = try std.fmt.bufPrint(&sub_path_buf, "{s}/{s}", .{ path, entry.name });
+
+        if (entry.kind == .directory) {
+            try deleteDirRecursive(sub_path, io);
+        } else {
+            try std.Io.Dir.deleteFileAbsolute(io, sub_path);
+        }
+    }
+    try std.Io.Dir.deleteDirAbsolute(io, path);
 }

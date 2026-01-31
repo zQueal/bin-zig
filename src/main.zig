@@ -43,12 +43,26 @@ pub fn main(init: std.process.Init) !void {
     }
     const command = command_maybe.?;
 
+    // Handle commands that don't require config
+    if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
+        printHelp();
+        return;
+    } else if (std.mem.eql(u8, command, "-v") or std.mem.eql(u8, command, "--version")) {
+        std.debug.print("bin-zig 0.1.0\n", .{});
+        return;
+    } else if (std.mem.eql(u8, command, "help")) {
+        const subcommand = args_iter.next();
+        if (subcommand == null) {
+            printHelp();
+            return;
+        }
+        printCommandHelp(subcommand.?);
+        return;
+    }
+
     // Load config
     var conf = try config.load(allocator, init.minimal.environ, init.io);
     defer conf.deinit();
-
-    // Validate config
-    try config.validate(&conf, init.io);
 
     const builtin = @import("builtin");
     if (conf.bin_dir.len == 0) {
@@ -64,6 +78,17 @@ pub fn main(init: std.process.Init) !void {
             conf.bin_dir = path;
         }
     }
+
+    // Create bin_dir if it doesn't exist (for first-time setup)
+    std.Io.Dir.createDirAbsolute(init.io, conf.bin_dir, .default_dir) catch |err| {
+        if (err != error.PathAlreadyExists) {
+            std.log.err("Could not create bin_dir '{s}': {}", .{ conf.bin_dir, err });
+            return err;
+        }
+    };
+
+    // Validate config (after defaults are applied and directory created)
+    try config.validate(&conf, init.io);
 
     if (std.mem.eql(u8, command, "install")) {
         var url: ?[]const u8 = null;
@@ -143,18 +168,6 @@ pub fn main(init: std.process.Init) !void {
         try clean_cmd.clean(allocator, &conf, init.minimal.environ, init.io);
     } else if (std.mem.eql(u8, command, "info")) {
         try info_cmd.info(allocator, &conf, init.minimal.environ, init.io);
-    } else if (std.mem.eql(u8, command, "help")) {
-        const subcommand = args_iter.next();
-        if (subcommand == null) {
-            printHelp();
-            return;
-        }
-        printCommandHelp(subcommand.?);
-        return;
-    } else if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
-        printHelp();
-    } else if (std.mem.eql(u8, command, "-v") or std.mem.eql(u8, command, "--version")) {
-        std.debug.print("bin-zig 0.1.0\n", .{});
     } else {
         std.log.err("Unknown command: {s}", .{command});
         printHelp();

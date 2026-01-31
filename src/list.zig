@@ -12,6 +12,10 @@ pub fn list(allocator: std.mem.Allocator, conf: *config.Config) !void {
     var it = conf.bins.iterator();
     while (it.next()) |entry| {
         const bin = entry.value_ptr.*;
-        std.log.info("  {s} (version: {s}, path: {s})", .{ bin.remote_name, bin.version, bin.path });
+        if (bin.pinned) {
+            std.log.info("  {s} (version: {s}, path: {s}, provider: {s}) [PINNED]", .{ bin.remote_name, bin.version, bin.path, bin.provider });
+        } else {
+            std.log.info("  {s} (version: {s}, path: {s}, provider: {s})", .{ bin.remote_name, bin.version, bin.path, bin.provider });
+        }
     }
 }

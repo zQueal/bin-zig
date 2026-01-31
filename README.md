@@ -91,6 +91,7 @@ The commands will process all binaries and report a summary of successes and fai
 You can use three different URL formats when installing:
 
 1. **Full URL** (auto-detects provider):
+
    ```bash
    bin install https://github.com/cli/cli
    bin install https://gitlab.com/gitlab-org/cli
@@ -98,6 +99,7 @@ You can use three different URL formats when installing:
    ```
 
 2. **Domain format** (auto-detects provider):
+
    ```bash
    bin install github.com/cli/cli
    bin install gitlab.com/gitlab-org/cli
@@ -105,11 +107,13 @@ You can use three different URL formats when installing:
    ```
 
 3. **Short format** (defaults to GitHub):
+
    ```bash
    bin install cli/cli
    ```
 
 4. **Short format with explicit provider**:
+
    ```bash
    bin install --provider gitlab gitlab-org/cli
    bin install --provider codeberg mergiraf/mergiraf
@@ -127,9 +131,10 @@ bin install cli/cli ~/bin/gh
 bin install cli/cli ./bin/gh
 ```
 
-> **Note**: The install path must exist and be writable. The directory will NOT be created automatically.
+> **Note**: The install path must exist and be writable.
 
 **When to use `-a` (Interactive Asset Selection)**:
+
 - By default, `bin-zig` automatically selects the best matching asset based on your OS and architecture
 - Use `-a` when you want to manually choose a different asset (e.g., a different architecture, build variant, or special distribution)
 - This is particularly useful when:
@@ -138,6 +143,7 @@ bin install cli/cli ./bin/gh
   - The automatic selection doesn't pick the asset you want
 
 **Example**:
+
 ```bash
 # Install GitHub CLI as 'gh' and interactively select the asset
 bin install cli/cli --as gh -a

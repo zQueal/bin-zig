@@ -13,6 +13,8 @@ pub fn prune(allocator: std.mem.Allocator, conf: *config.Config, env: std.proces
             if (err == error.FileNotFound) {
                 std.log.info("Binary {s} missing at {s}, removing from config.", .{ bin.remote_name, bin.path });
                 try to_remove.append(allocator, entry.key_ptr.*);
+            } else {
+                std.log.warn("Could not verify binary {s} at {s}: {}", .{ bin.remote_name, bin.path, err });
             }
             continue;
         };

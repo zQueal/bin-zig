@@ -111,7 +111,17 @@ fn parseChecksum(content: []const u8, asset_name: []const u8) !?[]const u8 {
             var parts = std.mem.splitAny(u8, trimmed, " \t*");
             while (parts.next()) |part| {
                 if (part.len == 64) { // SHA256 hex is 64 chars
-                    return part;
+                    // Validate all characters are valid hex
+                    var is_valid_hex = true;
+                    for (part) |c| {
+                        if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F'))) {
+                            is_valid_hex = false;
+                            break;
+                        }
+                    }
+                    if (is_valid_hex) {
+                        return part;
+                    }
                 }
             }
         }

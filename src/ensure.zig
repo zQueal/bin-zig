@@ -12,6 +12,8 @@ pub fn ensure(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
             if (err == error.FileNotFound) {
                 std.log.info("Binary {s} missing at {s}, reinstalling...", .{ bin.remote_name, bin.path });
                 try install.install(allocator, conf, bin.url, env, io, .{ .alias = bin.remote_name });
+            } else {
+                std.log.warn("Could not verify binary {s} at {s}: {}", .{ bin.remote_name, bin.path, err });
             }
             continue;
         };

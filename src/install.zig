@@ -64,6 +64,7 @@ pub const InstallOptions = struct {
 
 fn validateAndResolvePath(allocator: std.mem.Allocator, path: []const u8, env: std.process.Environ, io: std.Io) ![]const u8 {
     var resolved_path = path;
+    var resolved_path_allocated = false;
 
     // Expand ~ to home directory
     if (std.mem.startsWith(u8, path, "~/")) {
@@ -75,12 +76,13 @@ fn validateAndResolvePath(allocator: std.mem.Allocator, path: []const u8, env: s
         };
         defer allocator.free(home);
         resolved_path = try std.fs.path.join(allocator, &[_][]const u8{ home, path[2..] });
+        resolved_path_allocated = true;
     }
+    defer if (resolved_path_allocated) allocator.free(resolved_path);
 
-    // Convert relative to absolute
-    const cwd = try std.process.getCwdAlloc(allocator);
-    defer allocator.free(cwd);
-    const abs_path = try std.fs.path.resolve(allocator, &[_][]const u8{ cwd, resolved_path });
+    // Convert relative to absolute using path resolution
+    // std.fs.path.resolve normalizes paths and if the resolved_path is already absolute, returns it as-is
+    const abs_path = try std.fs.path.resolve(allocator, &[_][]const u8{resolved_path});
     errdefer allocator.free(abs_path);
 
     // Check if directory exists (DO NOT create it)
@@ -148,7 +150,7 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, url: []const 
 
     var repo = repo_full;
     var tag: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, repo_full, '@')) |at_idx| {
+    if (std.mem.lastIndexOfScalar(u8, repo_full, '@')) |at_idx| {
         repo = repo_full[0..at_idx];
         tag = repo_full[at_idx + 1 ..];
     }
