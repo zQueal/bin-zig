@@ -10,339 +10,233 @@ const prune_cmd = @import("prune.zig");
 const clean_cmd = @import("clean.zig");
 const info_cmd = @import("info.zig");
 
-fn collectNames(allocator: std.mem.Allocator, args_iter: *std.process.Args.Iterator) ![]const []const u8 {
-    var names = std.ArrayList([]const u8).empty;
-    errdefer names.deinit(allocator);
+const version_string = "dev";
 
-    while (args_iter.next()) |name| {
-        try names.append(allocator, name);
-    }
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const gpa_allocator = gpa.allocator();
 
-    if (names.items.len == 0) {
-        return error.NoNamesProvided;
-    }
+    // The whole program is arena-backed: releases and installs allocate
+    // liberally with the understanding that everything is freed at exit.
+    var arena = std.heap.ArenaAllocator.init(gpa_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
-    return names.toOwnedSlice(allocator);
-}
-
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
-
-    // Get args iterator using the Init struct's args
-    var args_iter = try init.minimal.args.iterateAllocator(allocator);
+    var args_iter = try std.process.argsWithAllocator(allocator);
     defer args_iter.deinit();
 
-    // Skip executable name
-    _ = args_iter.next();
+    var env = try std.process.getEnvMap(allocator);
+    defer env.deinit();
 
-    // Get command
-    const command_maybe = args_iter.next();
-    if (command_maybe == null) {
-        printHelp();
-        return;
-    }
-    const command = command_maybe.?;
+    var args = std.ArrayList([]const u8).empty;
+    while (args_iter.next()) |a| try args.append(allocator, a);
 
-    // Handle commands that don't require config
-    if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
-        printHelp();
-        return;
-    } else if (std.mem.eql(u8, command, "-v") or std.mem.eql(u8, command, "--version")) {
-        std.debug.print("bin-zig 0.1.0\n", .{});
-        return;
-    } else if (std.mem.eql(u8, command, "help")) {
-        const subcommand = args_iter.next();
-        if (subcommand == null) {
-            printHelp();
-            return;
-        }
-        printCommandHelp(subcommand.?);
-        return;
-    }
-
-    // Load config
-    var conf = try config.load(allocator, init.minimal.environ, init.io);
-    defer conf.deinit();
-
-    const builtin = @import("builtin");
-    if (conf.bin_dir.len == 0) {
-        if (builtin.os.tag == .windows) {
-            const local_app_data = init.minimal.environ.getAlloc(allocator, "LOCALAPPDATA") catch try init.minimal.environ.getAlloc(allocator, "USERPROFILE");
-            defer allocator.free(local_app_data);
-            const path = try std.fs.path.join(conf.arena.allocator(), &[_][]const u8{ local_app_data, "bin" });
-            conf.bin_dir = path;
-        } else {
-            const home = init.minimal.environ.getAlloc(allocator, "HOME") catch return error.HomeNotFound;
-            defer allocator.free(home);
-            const path = try std.fs.path.join(conf.arena.allocator(), &[_][]const u8{ home, ".local", "bin" });
-            conf.bin_dir = path;
-        }
-    }
-
-    // Create bin_dir if it doesn't exist (for first-time setup)
-    std.Io.Dir.createDirAbsolute(init.io, conf.bin_dir, .default_dir) catch |err| {
-        if (err != error.PathAlreadyExists) {
-            std.log.err("Could not create bin_dir '{s}': {}", .{ conf.bin_dir, err });
-            return err;
-        }
+    var exit_code: u8 = 0;
+    run(allocator, env, args.items[1..]) catch |err| {
+        exit_code = switch (err) {
+            error.DryRunExit => 3,
+            else => 1,
+        };
+        std.log.err("command failed: {s}", .{@errorName(err)});
     };
 
-    // Validate config (after defaults are applied and directory created)
-    try config.validate(&conf, init.io);
+    std.process.exit(exit_code);
+}
 
-    if (std.mem.eql(u8, command, "install")) {
-        var url: ?[]const u8 = null;
-        var alias: ?[]const u8 = null;
-        var interactive = false;
-        var provider: ?install_cmd.Provider = null;
-        var install_path: ?[]const u8 = null;
-
-        while (args_iter.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--as")) {
-                alias = args_iter.next() orelse {
-                    std.log.err("--as requires a name", .{});
-                    return;
-                };
-            } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--all-assets")) {
-                interactive = true;
-            } else if (std.mem.eql(u8, arg, "--provider")) {
-                const prov_str = args_iter.next() orelse {
-                    std.log.err("--provider requires a type (github, gitlab, codeberg)", .{});
-                    return;
-                };
-                provider = if (std.mem.eql(u8, prov_str, "github")) .github else if (std.mem.eql(u8, prov_str, "gitlab")) .gitlab else if (std.mem.eql(u8, prov_str, "codeberg")) .codeberg else {
-                    std.log.err("Unknown provider: {s}", .{prov_str});
-                    std.log.err("Supported providers: github, gitlab, codeberg", .{});
-                    return;
-                };
-            } else if (url == null) {
-                url = arg;
-            } else if (install_path == null) {
-                install_path = arg;
-            }
+fn run(allocator: std.mem.Allocator, env: std.process.EnvMap, args: []const []const u8) !void {
+    // Global --debug flag (cobra persistent flag: may appear anywhere).
+    var debug = false;
+    var filtered = std.ArrayList([]const u8).empty;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--debug")) {
+            debug = true;
+        } else {
+            try filtered.append(allocator, a);
         }
-
-        if (url == null) {
-            std.log.err("Usage: bin install <url> [--as <name>] [-a] [--provider <type>] [path]", .{});
-            return;
-        }
-
-        try install_cmd.install(allocator, &conf, url.?, init.minimal.environ, init.io, .{ .alias = alias, .interactive = interactive, .provider = provider, .install_path = install_path });
-    } else if (std.mem.eql(u8, command, "update")) {
-        var targets = std.ArrayList([]const u8).empty;
-        defer targets.deinit(allocator);
-
-        var all_flag = false;
-
-        while (args_iter.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--all")) {
-                all_flag = true;
-            } else {
-                try targets.append(allocator, arg);
-            }
-        }
-
-        try update_cmd.update(allocator, &conf, if (targets.items.len == 0) null else targets.items, all_flag, init.minimal.environ, init.io);
-    } else if (std.mem.eql(u8, command, "list")) {
-        try list_cmd.list(allocator, &conf);
-    } else if (std.mem.eql(u8, command, "remove")) {
-        const names = try collectNames(allocator, &args_iter);
-        defer allocator.free(names);
-
-        try remove_cmd.remove(allocator, &conf, names, init.minimal.environ, init.io);
-    } else if (std.mem.eql(u8, command, "ensure")) {
-        try ensure_cmd.ensure(allocator, &conf, init.minimal.environ, init.io);
-    } else if (std.mem.eql(u8, command, "pin")) {
-        const names = try collectNames(allocator, &args_iter);
-        defer allocator.free(names);
-
-        try pin_cmd.pin(allocator, &conf, names, init.minimal.environ, init.io);
-    } else if (std.mem.eql(u8, command, "unpin")) {
-        const names = try collectNames(allocator, &args_iter);
-        defer allocator.free(names);
-
-        try pin_cmd.unpin(allocator, &conf, names, init.minimal.environ, init.io);
-    } else if (std.mem.eql(u8, command, "prune")) {
-        try prune_cmd.prune(allocator, &conf, init.minimal.environ, init.io);
-    } else if (std.mem.eql(u8, command, "clean")) {
-        try clean_cmd.clean(allocator, &conf, init.minimal.environ, init.io);
-    } else if (std.mem.eql(u8, command, "info")) {
-        try info_cmd.info(allocator, &conf, init.minimal.environ, init.io);
-    } else {
-        std.log.err("Unknown command: {s}", .{command});
-        printHelp();
     }
+    const argv = filtered.items;
+    if (debug) std.log.info("debug logs enabled, version: {s}", .{version_string});
+
+    // No arguments defaults to `list` (reference behavior).
+    if (argv.len == 0) {
+        var conf = try config.load(allocator, env);
+        defer conf.deinit();
+        return list_cmd.list(allocator, &conf, env);
+    }
+
+    const command = argv[0];
+
+    // Root-level flags.
+    if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "help")) {
+        printHelp();
+        return;
+    }
+    if (std.mem.eql(u8, command, "-v") or std.mem.eql(u8, command, "--version")) {
+        std.debug.print("{s}\n", .{version_string});
+        return;
+    }
+
+    const cmd_name = resolveCommand(command) orelse {
+        std.debug.print("unknown command: bin {s}\n", .{command});
+        std.process.exit(1);
+    };
+
+    var conf = try config.load(allocator, env);
+    defer conf.deinit();
+
+    if (std.mem.eql(u8, cmd_name, "install")) {
+        return cmdInstall(allocator, &conf, env, argv[1..]);
+    } else if (std.mem.eql(u8, cmd_name, "update")) {
+        return cmdUpdate(allocator, &conf, env, argv[1..]);
+    } else if (std.mem.eql(u8, cmd_name, "list")) {
+        return list_cmd.list(allocator, &conf, env);
+    } else if (std.mem.eql(u8, cmd_name, "remove")) {
+        return remove_cmd.remove(allocator, &conf, env, argv[1..]);
+    } else if (std.mem.eql(u8, cmd_name, "ensure")) {
+        return ensure_cmd.ensure(allocator, &conf, env, argv[1..]);
+    } else if (std.mem.eql(u8, cmd_name, "pin")) {
+        return pin_cmd.pin(allocator, &conf, env, argv[1..], true);
+    } else if (std.mem.eql(u8, cmd_name, "unpin")) {
+        return pin_cmd.pin(allocator, &conf, env, argv[1..], false);
+    } else if (std.mem.eql(u8, cmd_name, "prune")) {
+        return cmdPrune(allocator, &conf, env, argv[1..]);
+    } else if (std.mem.eql(u8, cmd_name, "clean")) {
+        return clean_cmd.clean(allocator, &conf, env);
+    } else if (std.mem.eql(u8, cmd_name, "info")) {
+        return info_cmd.info(allocator);
+    }
+    unreachable;
+}
+
+fn resolveCommand(command: []const u8) ?[]const u8 {
+    const aliases = [_][2][]const u8{
+        .{ "install", "install" },
+        .{ "i", "install" },
+        .{ "update", "update" },
+        .{ "u", "update" },
+        .{ "ensure", "ensure" },
+        .{ "e", "ensure" },
+        .{ "list", "list" },
+        .{ "ls", "list" },
+        .{ "remove", "remove" },
+        .{ "rm", "remove" },
+        .{ "pin", "pin" },
+        .{ "unpin", "unpin" },
+        .{ "prune", "prune" },
+        .{ "clean", "clean" },
+        .{ "info", "info" },
+    };
+    for (aliases) |pair| {
+        if (std.mem.eql(u8, command, pair[0])) return pair[1];
+    }
+    return null;
+}
+
+fn cmdInstall(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.EnvMap, args: []const []const u8) !void {
+    var opts = install_cmd.InstallOpts{};
+    var positionals = std.ArrayList([]const u8).empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "-f") or std.mem.eql(u8, a, "--force")) {
+            opts.force = true;
+        } else if (std.mem.eql(u8, a, "-a") or std.mem.eql(u8, a, "--all")) {
+            opts.all = true;
+        } else if (std.mem.eql(u8, a, "-p") or std.mem.eql(u8, a, "--provider")) {
+            i += 1;
+            if (i >= args.len) return error.MissingFlagValue;
+            opts.provider = args[i];
+        } else if (std.mem.eql(u8, a, "-n") or std.mem.eql(u8, a, "--name")) {
+            i += 1;
+            if (i >= args.len) return error.MissingFlagValue;
+            opts.name_pattern = args[i];
+        } else {
+            try positionals.append(allocator, a);
+        }
+    }
+    if (positionals.items.len == 0) {
+        std.log.err("install requires a url", .{});
+        return error.UrlRequired;
+    }
+
+    const url = positionals.items[0];
+    var resolved_path: []const u8 = conf.default_path;
+    if (positionals.items.len > 1) {
+        resolved_path = positionals.items[1];
+        // A name (no forward slash) is joined with the default path.
+        if (std.mem.indexOfScalar(u8, resolved_path, '/') == null) {
+            resolved_path = try std.fs.path.join(allocator, &[_][]const u8{ conf.default_path, resolved_path });
+        }
+    }
+
+    return install_cmd.install(allocator, conf, env, url, resolved_path, opts);
+}
+
+fn cmdUpdate(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.EnvMap, args: []const []const u8) !void {
+    var opts = update_cmd.UpdateOpts{};
+    var names = std.ArrayList([]const u8).empty;
+    var exclude = std.ArrayList([]const u8).empty;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--dry-run")) {
+            opts.dry_run = true;
+        } else if (std.mem.eql(u8, a, "-y") or std.mem.eql(u8, a, "--yes")) {
+            opts.yes_to_update = true;
+        } else if (std.mem.eql(u8, a, "-a") or std.mem.eql(u8, a, "--all")) {
+            opts.all = true;
+        } else if (std.mem.eql(u8, a, "-p") or std.mem.eql(u8, a, "--skip-path-check")) {
+            opts.skip_path_check = true;
+        } else if (std.mem.eql(u8, a, "-c") or std.mem.eql(u8, a, "--continue-on-error")) {
+            opts.continue_on_error = true;
+        } else if (std.mem.eql(u8, a, "-x") or std.mem.eql(u8, a, "--exclude")) {
+            i += 1;
+            if (i >= args.len) return error.MissingFlagValue;
+            try exclude.append(allocator, args[i]);
+        } else {
+            try names.append(allocator, a);
+        }
+    }
+    opts.exclude = exclude.items;
+    return update_cmd.update(allocator, conf, env, names.items, opts);
+}
+
+fn cmdPrune(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.EnvMap, args: []const []const u8) !void {
+    var force = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "-f") or std.mem.eql(u8, a, "--force")) force = true;
+    }
+    return prune_cmd.prune(allocator, conf, env, force);
 }
 
 fn printHelp() void {
     std.debug.print(
-        \\Usage: bin <command> [args]
+        \\Effortless binary manager
         \\
-        \\Commands:
-        \\  install <url>    Install from GitHub, GitLab, or Codeberg
-        \\                   URL formats: https://, domain (github.com/), or short (user/repo)
-        \\                   Arguments: [path] custom install directory (must exist, must be writable)
-        \\                   Flags: --as <name> to rename binary
-        \\                          -a, --all-assets to interactively select assets
-        \\                          --provider <type> for explicit provider (github/gitlab/codeberg)
-        \\  update [name...] Update installed binaries (specific or all)
-        \\                   Flags: --all to update all binaries
-        \\  list             List installed binaries and versions
-        \\  remove <name...> Remove installed binaries (works with .exe)
-        \\  ensure           Verify and reinstall missing binaries
-        \\  pin <name...>    Lock binaries to current versions
-        \\  unpin <name...>  Unlock binaries for updates
-        \\  prune            Remove dead entries from configuration
-        \\  clean            Clear download/extraction cache
-        \\  info             Show API rate limit information
-        \\  help [command]   Show help for specific command
+        \\Usage:
+        \\  bin [command]
         \\
-        \\Global Flags:
-        \\  -h, --help       Display this help and exit
-        \\  -v, --version    Output version information and exit
+        \\Available Commands:
+        \\  ensure    Ensures that all binaries listed in the configuration are present
+        \\  help      Help about any command
+        \\  install   Installs the specified binary from a url
+        \\  list      List binaries managed by bin
+        \\  pin       Pins current version of the binaries
+        \\  prune     Prunes binaries that no longer exist in the system
+        \\  remove    Removes binaries managed by bin
+        \\  unpin     Unpins current version of the binaries
+        \\  update    Updates one or multiple binaries managed by bin
+        \\  clean     Clears the download cache (zig extension)
+        \\  info      Shows API rate limit information (zig extension)
+        \\
+        \\Flags:
+        \\      --debug   Enable debug mode
+        \\  -h, --help    help for bin
+        \\  -v, --version version for bin
+        \\
+        \\Use "bin [command] --help" for more information about a command.
         \\
     , .{});
-}
-
-fn printCommandHelp(command: []const u8) void {
-    if (std.mem.eql(u8, command, "install")) {
-        std.debug.print(
-            \\bin install <url> [path] - Install binary from GitHub, GitLab, or Codeberg
-            \\
-            \\Arguments:
-            \\  url       Repository URL or user/repo
-            \\            Supported formats:
-            \\              - Full URL: https://github.com/cli/cli
-            \\              - Domain: github.com/cli/cli
-            \\              - Short: cli/cli (defaults to GitHub)
-            \\  path      Optional custom install directory (absolute or relative)
-            \\            Path must exist and be writable.
-            \\
-            \\Flags:
-            \\  --as <name>         Install with custom alias instead of repo name
-            \\  -a, --all-assets    Interactive mode to manually select from assets
-            \\  --provider <type>    Explicit provider: github, gitlab, or codeberg
-            \\
-            \\Examples:
-            \\  bin install cli/cli
-            \\  bin install gitlab.com/gitlab-org/cli --as glab
-            \\  bin install cli/cli ~/bin/gh
-            \\  bin install cli/cli --as gh -a
-            \\  bin install --provider gitlab gitlab-org/cli
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "update")) {
-        std.debug.print(
-            \\bin update [name...] - Update installed binaries
-            \\
-            \\Arguments:
-            \\  name      One or more binary names to update (optional)
-            \\
-            \\Flags:
-            \\  --all     Update all managed binaries
-            \\
-            \\Examples:
-            \\  bin update           Check all binaries for updates
-            \\  bin update gh        Update specific binary
-            \\  bin update gh kubectl Update multiple binaries
-            \\  bin update --all     Update all binaries
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "list")) {
-        std.debug.print(
-            \\bin list - List installed binaries and versions
-            \\
-            \\Displays all managed binaries with their version, path, and provider.
-            \\
-            \\Example output:
-            \\  gh (version: v2.40.0, path: /home/user/.local/bin/gh, provider: github)
-            \\  kubectl (version: v1.29.0, path: /home/user/.local/bin/kubectl, provider: github)
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "remove")) {
-        std.debug.print(
-            \\bin remove <name...> - Remove one or more installed binaries
-            \\
-            \\Arguments:
-            \\  name      One or more binary names to remove
-            \\
-            \\Examples:
-            \\  bin remove gh
-            \\  bin remove gh kubectl fzf
-            \\  bin remove gh.exe  (also works without .exe)
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "ensure")) {
-        std.debug.print(
-            \\bin ensure - Verify and reinstall missing binaries
-            \\
-            \\Checks all managed binaries and reinstalls any that are missing from disk.
-            \\Useful for restoration after system maintenance or cleanup.
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "pin")) {
-        std.debug.print(
-            \\bin pin <name...> - Lock binary to current version
-            \\
-            \\Arguments:
-            \\  name      One or more binary names to pin
-            \\
-            \\Pinned binaries will not be updated by 'bin update --all'.
-            \\
-            \\Examples:
-            \\  bin pin terraform
-            \\  bin pin terraform kubectl
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "unpin")) {
-        std.debug.print(
-            \\bin unpin <name...> - Unlock binary for updates
-            \\
-            \\Arguments:
-            \\  name      One or more binary names to unpin
-            \\
-            \\Examples:
-            \\  bin unpin terraform
-            \\  bin unpin terraform kubectl
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "prune")) {
-        std.debug.print(
-            \\bin prune - Remove dead entries from configuration
-            \\
-            \\Removes entries for binaries that no longer exist on disk
-            \\from the managed binaries list.
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "clean")) {
-        std.debug.print(
-            \\bin clean - Clear download/extraction cache
-            \\
-            \\Removes all cached downloaded files from the cache directory.
-            \\Does not affect installed binaries.
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "info")) {
-        std.debug.print(
-            \\bin info - Show API rate limit information
-            \\
-            \\Displays current API rate limit status for GitHub, GitLab, and Codeberg.
-            \\
-        , .{});
-    } else if (std.mem.eql(u8, command, "help")) {
-        std.debug.print(
-            \\bin help [command] - Display help information
-            \\
-            \\Arguments:
-            \\  command   Optional command to show detailed help for
-            \\
-            \\Examples:
-            \\  bin help           Show general help
-            \\  bin help install   Show detailed install command help
-            \\
-        , .{});
-    } else {
-        std.log.err("Unknown command: {s}", .{command});
-        std.debug.print("\nRun 'bin help' to see all available commands.\n", .{});
-    }
 }

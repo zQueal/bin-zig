@@ -21,10 +21,10 @@ debug:
 install: build
     @echo "Please move zig-out/bin/bin to your desired binary directory."
 
-# Download and install Zig (v0.16-dev) for Windows
+# Download and install Zig (v0.15.2) for Windows
 install-zig:
-    $ver = "0.16.0-dev.2296+fd3657bf8"
-    $url = "https://ziglang.org/builds/zig-x86_64-windows-$ver.zip"
+    $ver = "0.15.2"
+    $url = "https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip"
     $dest = "zig-windows.zip"
     $extractDir = "zig-compiler"
     echo "Downloading Zig $ver..."

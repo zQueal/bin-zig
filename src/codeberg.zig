@@ -1,144 +1,180 @@
+//! Codeberg (Gitea/Forgejo) provider mirroring pkg/providers/codeberg.go.
+//! Self-hosted instances are supported via the URL hostname.
+
 const std = @import("std");
-const utils = @import("utils.zig");
+const assets = @import("assets.zig");
+const http_util = @import("http_util.zig");
+const providers = @import("providers.zig");
 
-pub const Asset = struct {
-    name: []const u8,
-    browser_download_url: []const u8,
-    score: i32 = 0,
-};
+pub const Codeberg = struct {
+    owner: []const u8,
+    repo: []const u8,
+    tag: []const u8,
+    token: []const u8,
+    api_base: []const u8,
 
-pub const Release = struct {
-    tag_name: []const u8,
-    assets: []Asset,
-};
-
-const GiteaRelease = struct {
-    tag_name: []const u8,
-    assets: []struct {
-        name: []const u8,
-        browser_download_url: []const u8,
-    },
-};
-
-pub fn fetchRelease(allocator: std.mem.Allocator, client: *std.http.Client, user: []const u8, repo: []const u8, tag: []const u8, token: []const u8) !Release {
-    const api_url = if (tag.len == 0)
-        try std.fmt.allocPrint(allocator, "https://codeberg.org/api/v1/repos/{s}/{s}/releases/latest", .{ user, repo })
-    else
-        try std.fmt.allocPrint(allocator, "https://codeberg.org/api/v1/repos/{s}/{s}/releases/tags/{s}", .{ user, repo, tag });
-    defer allocator.free(api_url);
-
-    const uri = try std.Uri.parse(api_url);
-
-    var extra_headers_list: std.ArrayList(std.http.Header) = .empty;
-    defer extra_headers_list.deinit(allocator);
-
-    // Track Authorization header value for proper cleanup
-    var auth_header_value: ?[]const u8 = null;
-    if (token.len > 0) {
-        auth_header_value = try std.fmt.allocPrint(allocator, "token {s}", .{token});
-        try extra_headers_list.append(allocator, .{ .name = "Authorization", .value = auth_header_value.? });
-    }
-    defer if (auth_header_value) |v| allocator.free(v);
-
-    var req = try client.request(.GET, uri, .{
-        .extra_headers = extra_headers_list.items,
-        .redirect_behavior = @enumFromInt(5),
-        .headers = .{
-            .user_agent = .{ .override = "bin-zig-cli" },
-            .connection = .{ .override = "close" },
-        },
-    });
-    defer req.deinit();
-
-    var head_buf: [2048]u8 = undefined;
-    var resp = try req.receiveHead(&head_buf);
-    if (resp.head.status != .ok) return error.CodebergApiError;
-
-    var transfer_buffer: [8192]u8 = undefined;
-    var reader = resp.reader(&transfer_buffer);
-    const body = try reader.allocRemaining(allocator, .limited(10 * 1024 * 1024));
-    defer allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(GiteaRelease, allocator, body, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-
-    var assets = try allocator.alloc(Asset, parsed.value.assets.len);
-    for (parsed.value.assets, 0..) |asset, i| {
-        assets[i] = .{
-            .name = try allocator.dupe(u8, asset.name),
-            .browser_download_url = try allocator.dupe(u8, asset.browser_download_url),
-        };
-    }
-
-    return .{
-        .tag_name = try allocator.dupe(u8, parsed.value.tag_name),
-        .assets = assets,
-    };
-}
-
-pub fn selectBestAsset(allocator: std.mem.Allocator, release: Release) !?Asset {
-    const os_keywords = utils.getOsKeywords();
-    const arch_keywords = utils.getArchKeywords();
-    const extensions = utils.getExtensions();
-
-    var best_asset: ?Asset = null;
-    var highest_score: i32 = -1;
-
-    for (release.assets) |*asset| {
-        var score: i32 = 0;
-        const name = asset.name;
-
-        var found_os = false;
-        for (os_keywords) |kw| {
-            if (std.mem.indexOf(u8, name, kw) != null) {
-                found_os = true;
-                score += 10;
-                break;
-            }
+    pub fn init(allocator: std.mem.Allocator, uri: std.Uri, provider_name: []const u8) !Codeberg {
+        _ = provider_name;
+        var segments = std.ArrayList([]const u8).empty;
+        defer segments.deinit(allocator);
+        var it = std.mem.splitScalar(u8, providers.Provider.pathString(uri), '/');
+        while (it.next()) |seg| {
+            if (seg.len > 0) try segments.append(allocator, seg);
         }
-        if (!found_os) continue;
-
-        var found_arch = false;
-        for (arch_keywords) |kw| {
-            if (std.mem.indexOf(u8, name, kw) != null) {
-                found_arch = true;
-                score += 10;
-                break;
-            }
+        if (segments.items.len < 2) {
+            std.log.debug("error parsing Codeberg URL, can't find owner and repo", .{});
+            return error.InvalidURL;
         }
-        if (!found_arch) continue;
 
-        for (extensions, 0..) |ext, i| {
-            if (ext.len > 0 and std.mem.endsWith(u8, name, ext)) {
-                score += @intCast(extensions.len - i);
-                break;
-            } else if (ext.len == 0) {
-                if (std.mem.lastIndexOfScalar(u8, name, '.') == null) {
-                    score += 5;
+        var tag: []const u8 = "";
+        var repo = segments.items[1];
+        if (std.mem.indexOf(u8, providers.Provider.pathString(uri), "/releases/") != null) {
+            for (segments.items, 0..) |seg, i| {
+                if (std.mem.eql(u8, seg, "releases")) {
+                    var parts = std.ArrayList([]const u8).empty;
+                    defer parts.deinit(allocator);
+                    for (segments.items[i + 2 ..]) |p| try parts.append(allocator, p);
+                    tag = try std.mem.join(allocator, "/", parts.items);
+                    break;
                 }
             }
         }
 
-        asset.score = score;
-        if (score > highest_score) {
-            highest_score = score;
-            best_asset = asset.*;
+        // Zig extension (update-bug fix): support user/repo@tag pinning.
+        if (tag.len == 0) {
+            if (std.mem.lastIndexOfScalar(u8, repo, '@')) |at_idx| {
+                tag = repo[at_idx + 1 ..];
+                repo = repo[0..at_idx];
+            }
         }
-    }
 
-    // Sort assets by score descending
-    std.mem.sort(Asset, release.assets, {}, struct {
-        fn lessThan(_: void, a: Asset, b: Asset) bool {
-            return a.score > b.score;
-        }
-    }.lessThan);
+        const hostname = providers.Provider.hostString(uri) orelse return error.InvalidURL;
+        const token = std.process.getEnvVarOwned(allocator, "CODEBERG_TOKEN") catch "";
+        const api_base = try std.fmt.allocPrint(allocator, "https://{s}/api/v1", .{hostname});
 
-    if (best_asset) |a| {
         return .{
-            .name = try allocator.dupe(u8, a.name),
-            .browser_download_url = try allocator.dupe(u8, a.browser_download_url),
-            .score = a.score,
+            .owner = try allocator.dupe(u8, segments.items[0]),
+            .repo = try allocator.dupe(u8, repo),
+            .tag = tag,
+            .token = token,
+            .api_base = api_base,
         };
     }
-    return null;
-}
+
+    pub fn getID() []const u8 {
+        return "codeberg";
+    }
+
+    fn authHeaders(self: *const Codeberg, allocator: std.mem.Allocator) []const std.http.Header {
+        if (self.token.len == 0) return &.{};
+        const headers = allocator.alloc(std.http.Header, 1) catch return &.{};
+        const auth = std.fmt.allocPrint(allocator, "token {s}", .{self.token}) catch {
+            return &.{};
+        };
+        headers[0] = .{ .name = "Authorization", .value = auth };
+        return headers;
+    }
+
+    /// Extra headers for asset downloads.
+    pub fn downloadHeaders(self: *const Codeberg, allocator: std.mem.Allocator) []const std.http.Header {
+        if (self.token.len == 0) {
+            return &.{
+                .{ .name = "Accept", .value = "application/octet-stream" },
+            };
+        }
+        const headers = allocator.alloc(std.http.Header, 2) catch return &.{};
+        headers[0] = .{ .name = "Accept", .value = "application/octet-stream" };
+        const auth = std.fmt.allocPrint(allocator, "token {s}", .{self.token}) catch {
+            return &.{};
+        };
+        headers[1] = .{ .name = "Authorization", .value = auth };
+        return headers;
+    }
+
+    fn repoApi(self: *const Codeberg, allocator: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(allocator, "{s}/repos/{s}/{s}", .{ self.api_base, self.owner, self.repo });
+    }
+
+    pub fn fetchRelease(self: *const Codeberg, allocator: std.mem.Allocator, client: *std.http.Client, opts: providers.FetchOpts) !providers.Release {
+        var tag = self.tag;
+        if (opts.version.len > 0) tag = opts.version;
+
+        var release_json: std.json.Value = undefined;
+        if (tag.len > 0) {
+            std.log.info("Getting {s} release for {s}/{s}", .{ tag, self.owner, self.repo });
+            const enc_tag = try http_util.encodePathSegment(allocator, tag);
+            const url = try std.fmt.allocPrint(allocator, "{s}/releases/tags/{s}", .{ try self.repoApi(allocator), enc_tag });
+            defer allocator.free(url);
+            release_json = try http_util.getJson(allocator, client, url, self.authHeaders(allocator));
+        } else {
+            std.log.info("Getting latest release for {s}/{s}", .{ self.owner, self.repo });
+            const url = try std.fmt.allocPrint(allocator, "{s}/releases/latest", .{ try self.repoApi(allocator) });
+            defer allocator.free(url);
+            release_json = http_util.getJson(allocator, client, url, self.authHeaders(allocator)) catch |err| switch (err) {
+                error.RequestFailed => {
+                    std.log.err("repository {s}/{s} does not have releases", .{ self.owner, self.repo });
+                    return error.NoReleases;
+                },
+                else => return err,
+            };
+        }
+
+        var version: []const u8 = "";
+        if (release_json.object.get("tag_name")) |t| {
+                    if (t == .string) {
+                        version = t.string;
+                    }
+                }
+
+        var candidates = std.ArrayList(assets.Asset).empty;
+        defer candidates.deinit(allocator);
+        if (release_json.object.get("assets")) |a| {
+            if (a == .array) {
+                for (a.array.items) |item| {
+                    if (item != .object) continue;
+                    var name: []const u8 = "";
+                    var durl: []const u8 = "";
+                    if (item.object.get("name")) |n| {
+                    if (n == .string) {
+                        name = n.string;
+                    }
+                }
+                    if (item.object.get("browser_download_url")) |u| {
+                    if (u == .string) {
+                        durl = u.string;
+                    }
+                }
+                    if (name.len > 0 and durl.len > 0) {
+                        try candidates.append(allocator, .{ .name = try allocator.dupe(u8, name), .url = try allocator.dupe(u8, durl) });
+                    }
+                }
+            }
+        }
+
+        return .{
+            .version = try allocator.dupe(u8, version),
+            .repo_name = self.repo,
+            .assets = try candidates.toOwnedSlice(allocator),
+        };
+    }
+
+    pub fn getLatestVersion(self: *const Codeberg, allocator: std.mem.Allocator, client: *std.http.Client) !providers.Latest {
+        std.log.debug("Getting latest release for {s}/{s}", .{ self.owner, self.repo });
+        const url = try std.fmt.allocPrint(allocator, "{s}/releases/latest", .{ try self.repoApi(allocator) });
+        defer allocator.free(url);
+        const release = try http_util.getJson(allocator, client, url, self.authHeaders(allocator));
+        var version: []const u8 = "";
+        var html_url: []const u8 = "";
+        if (release.object.get("tag_name")) |t| {
+                    if (t == .string) {
+                        version = t.string;
+                    }
+                }
+        if (release.object.get("html_url")) |h| {
+                    if (h == .string) {
+                        html_url = h.string;
+                    }
+                }
+        return .{ .version = try allocator.dupe(u8, version), .url = try allocator.dupe(u8, html_url) };
+    }
+};

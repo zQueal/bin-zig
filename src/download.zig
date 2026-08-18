@@ -9,12 +9,12 @@ pub const DownloadOptions = struct {
 const Context = struct {
     client: *std.http.Client,
     url: []const u8,
-    file: std.Io.File,
-    io: std.Io,
+    file: std.fs.File,
     start: u64,
     end: u64,
     id: u32,
     progress: *std.atomic.Value(u64),
+    failed: *std.atomic.Value(bool),
 };
 
 const DownloadInfo = struct {
@@ -23,25 +23,53 @@ const DownloadInfo = struct {
     supports_ranges: bool,
 };
 
-pub fn download(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, dest_path: []const u8, io: std.Io, options: DownloadOptions) !void {
+pub fn download(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, dest_path: []const u8, options: DownloadOptions) !void {
     const info = fetchDownloadInfo(allocator, client, url) catch |err| {
         std.log.err("Failed to fetch download info for '{s}': {}", .{ url, err });
         return err;
     };
     defer allocator.free(info.final_url);
 
-    const file = std.Io.Dir.createFileAbsolute(io, dest_path, .{ .read = true }) catch |err| {
+    const file = std.fs.createFileAbsolute(dest_path, .{ .read = true }) catch |err| {
         std.log.err("Failed to create file at '{s}': {}", .{ dest_path, err });
         return err;
     };
-    defer file.close(io);
+    defer file.close();
 
     if (info.supports_ranges and info.size >= options.min_parallel_size and options.threads > 1) {
-        try downloadParallel(allocator, client, info, file, io, options);
+        try downloadParallel(allocator, client, info, file, options);
     } else {
-        try downloadStreaming(allocator, client, info.final_url, file, io);
+        try downloadStreaming(allocator, client, info.final_url, file);
     }
 }
+
+/// Downloads a URL fully into memory (used by the asset pipeline, mirroring
+/// the reference implementation which buffers downloads in memory).
+pub fn downloadToMemory(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, extra_headers: []const std.http.Header) ![]const u8 {
+    const uri = try std.Uri.parse(url);
+    var req = try client.request(.GET, uri, .{
+        .redirect_behavior = @enumFromInt(5),
+        .extra_headers = extra_headers,
+        .headers = .{
+            .user_agent = .{ .override = "bin-cli" },
+            .connection = .{ .override = "close" },
+        },
+    });
+    defer req.deinit();
+    try req.sendBodiless();
+
+    var head_buf: [2048]u8 = undefined;
+    var resp = try req.receiveHead(&head_buf);
+    if (resp.head.status != .ok) return error.DownloadFailed;
+
+    var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    var transfer_buffer: [8192]u8 = undefined;
+    var reader = resp.readerDecompressing(&transfer_buffer, &decompress, &decompress_buf);
+    return reader.allocRemaining(allocator, .limited(max_memory_download));
+}
+
+const max_memory_download = 4 * 1024 * 1024 * 1024; // 4GB
 
 fn fetchDownloadInfo(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8) !DownloadInfo {
     const uri = std.Uri.parse(url) catch |err| {
@@ -59,9 +87,10 @@ fn fetchDownloadInfo(allocator: std.mem.Allocator, client: *std.http.Client, url
         return err;
     };
     defer req.deinit();
+    try req.sendBodiless();
 
     var head_buf: [4096]u8 = undefined;
-    var resp = req.receiveHead(&head_buf) catch |err| {
+    const resp = req.receiveHead(&head_buf) catch |err| {
         std.log.err("Failed to receive HTTP response headers: {}", .{err});
         return err;
     };
@@ -71,7 +100,7 @@ fn fetchDownloadInfo(allocator: std.mem.Allocator, client: *std.http.Client, url
         return error.DownloadFailed;
     }
 
-    const final_url = try std.fmt.allocPrint(allocator, "{}", .{req.uri});
+    const final_url = try std.fmt.allocPrint(allocator, "{f}", .{req.uri});
 
     var size: u64 = 0;
     if (resp.head.content_length) |cl| {
@@ -99,7 +128,7 @@ fn fetchDownloadInfo(allocator: std.mem.Allocator, client: *std.http.Client, url
     };
 }
 
-fn downloadStreaming(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, file: std.Io.File, io: std.Io) !void {
+fn downloadStreaming(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, file: std.fs.File) !void {
     _ = allocator;
     const uri = try std.Uri.parse(url);
     var req = try client.request(.GET, uri, .{
@@ -110,6 +139,7 @@ fn downloadStreaming(allocator: std.mem.Allocator, client: *std.http.Client, url
         },
     });
     defer req.deinit();
+    try req.sendBodiless();
 
     var head_buf: [1024]u8 = undefined;
     var resp = try req.receiveHead(&head_buf);
@@ -121,33 +151,46 @@ fn downloadStreaming(allocator: std.mem.Allocator, client: *std.http.Client, url
     var transfer_buffer: [8192]u8 = undefined;
     var reader = resp.reader(&transfer_buffer);
     var write_buf: [8192]u8 = undefined;
-    var writer = file.writerStreaming(io, &write_buf);
+    var writer = file.writerStreaming(&write_buf);
 
     var buf: [8192]u8 = undefined;
     var stdout_buf: [128]u8 = undefined;
-    var stdout_file = std.Io.File.stdout();
-    var stdout = stdout_file.writer(io, &stdout_buf);
+    var stdout_file = std.fs.File.stdout();
+    var stdout = stdout_file.writer(&stdout_buf);
 
-    while (true) {
-        const n = try reader.readSliceShort(&buf);
-        if (n == 0) break;
-        try writer.interface.writeAll(buf[0..n]);
-        downloaded += n;
+    if (total_size > 0) {
+        // Content length is known: read exactly that many bytes. Reading past the
+        // end trips a 0.15.x std bug in the http contentLengthStream state machine.
+        while (downloaded < total_size) {
+            const want = @min(buf.len, total_size - downloaded);
+            const n = try reader.readSliceShort(buf[0..want]);
+            if (n == 0) return error.DownloadFailed; // premature EOF
+            try writer.interface.writeAll(buf[0..n]);
+            downloaded += n;
 
-        if (total_size > 0) {
             const percent = downloaded * 100 / total_size;
             try stdout.interface.print("\rDownloading: {d}% ({d}/{d} bytes)", .{ percent, downloaded, total_size });
-        } else {
-            try stdout.interface.print("\rDownloading: {d} bytes", .{downloaded});
+            try stdout.interface.flush();
         }
-        try stdout.interface.flush();
+    } else {
+        // Unknown length (no Content-Length header): the body reader is the raw
+        // connection reader, which reports EOF as a short read.
+        while (true) {
+            const n = try reader.readSliceShort(&buf);
+            if (n == 0) break;
+            try writer.interface.writeAll(buf[0..n]);
+            downloaded += n;
+
+            try stdout.interface.print("\rDownloading: {d} bytes", .{downloaded});
+            try stdout.interface.flush();
+        }
     }
     try writer.interface.flush();
     try stdout.interface.writeAll("\n");
     try stdout.interface.flush();
 }
 
-fn downloadParallel(allocator: std.mem.Allocator, client: *std.http.Client, info: DownloadInfo, file: std.Io.File, io: std.Io, options: DownloadOptions) !void {
+fn downloadParallel(allocator: std.mem.Allocator, client: *std.http.Client, info: DownloadInfo, file: std.fs.File, options: DownloadOptions) !void {
     std.log.info("Starting parallel download ({} threads, {d} bytes)...", .{ options.threads, info.size });
 
     const chunk_size = (info.size + options.threads - 1) / options.threads;
@@ -163,23 +206,27 @@ fn downloadParallel(allocator: std.mem.Allocator, client: *std.http.Client, info
     var targets = try allocator.alloc(u64, options.threads);
     defer allocator.free(targets);
 
+    var failed_values = try allocator.alloc(std.atomic.Value(bool), options.threads);
+    defer allocator.free(failed_values);
+
     for (0..options.threads) |i| {
         const start = i * chunk_size;
         const end = @min((i + 1) * chunk_size - 1, info.size - 1);
         const target = end - start + 1;
 
         progress_values[i] = std.atomic.Value(u64).init(0);
+        failed_values[i] = std.atomic.Value(bool).init(false);
         targets[i] = target;
 
         contexts[i] = .{
             .client = client,
             .url = info.final_url,
             .file = file,
-            .io = io,
             .start = start,
             .end = end,
             .id = @intCast(i),
             .progress = &progress_values[i],
+            .failed = &failed_values[i],
         };
 
         threads[i] = try std.Thread.spawn(.{}, downloadChunk, .{&contexts[i]});
@@ -187,8 +234,8 @@ fn downloadParallel(allocator: std.mem.Allocator, client: *std.http.Client, info
 
     // Reporter loop
     var stdout_buf: [1024]u8 = undefined;
-    var stdout_file = std.Io.File.stdout();
-    var stdout = stdout_file.writer(io, &stdout_buf);
+    var stdout_file = std.fs.File.stdout();
+    var stdout = stdout_file.writer(&stdout_buf);
 
     // Enable VT100 on Windows if possible
     if (@import("builtin").os.tag == .windows) {
@@ -217,19 +264,36 @@ fn downloadParallel(allocator: std.mem.Allocator, client: *std.http.Client, info
                 bar[j] = if (j < filled) '#' else '.';
             }
 
-            try stdout.interface.print("Thread {d:2}: [{s}] {d:3}% ({d}/{d})\n", .{ i, bar, percent, d, target });
+            const bar_slice: []const u8 = &bar;
+            try stdout.interface.print("Thread {d:2}: [{s}] {d:3}% ({d}/{d})\n", .{ i, bar_slice, percent, d, target });
             if (d < target) all_done = false;
         }
 
         if (all_done) break;
         try stdout.interface.flush();
-        try io.sleep(std.Io.Duration.fromMilliseconds(100), .awake);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
         try stdout.interface.print("\x1b[{d}A", .{options.threads});
     }
 
     for (threads) |t| {
         t.join();
     }
+
+    // Fail the download if any chunk failed: a partially written file must
+    // never be treated as a successful download.
+    for (failed_values) |fv| {
+        if (fv.load(.monotonic)) {
+            std.log.err("Parallel download failed: one or more chunks did not complete.", .{});
+            return error.DownloadFailed;
+        }
+    }
+    // Sanity check the total size.
+    const stat = try file.stat();
+    if (stat.size != info.size) {
+        std.log.err("Parallel download size mismatch: got {d}, expected {d}.", .{ stat.size, info.size });
+        return error.DownloadFailed;
+    }
+
     try stdout.interface.writeAll("\nDownload complete.\n");
     try stdout.interface.flush();
 }
@@ -250,17 +314,25 @@ fn downloadChunk(ctx: *const Context) void {
         },
     }) catch |err| {
         std.log.err("Thread {}: request failed: {any}", .{ ctx.id, err });
+        ctx.failed.store(true, .monotonic);
         return;
     };
     defer req.deinit();
+    req.sendBodiless() catch |err| {
+        std.log.err("Thread {}: sendBodiless failed: {any}", .{ ctx.id, err });
+        ctx.failed.store(true, .monotonic);
+        return;
+    };
 
     var head_buf: [1024]u8 = undefined;
     var resp = req.receiveHead(&head_buf) catch |err| {
         std.log.err("Thread {}: receiveHead failed: {any}", .{ ctx.id, err });
+        ctx.failed.store(true, .monotonic);
         return;
     };
     if (resp.head.status != .partial_content and resp.head.status != .ok) {
         std.log.err("Thread {}: unexpected status {d}", .{ ctx.id, @intFromEnum(resp.head.status) });
+        ctx.failed.store(true, .monotonic);
         return;
     }
 
@@ -272,18 +344,29 @@ fn downloadChunk(ctx: *const Context) void {
     const limit = ctx.end + 1;
 
     while (offset < limit) {
-        const n = reader.readSliceShort(&buf) catch |err| {
+        // Never read past the chunk end: the std http contentLengthStream
+        // panics on reads after EOF in 0.15.x.
+        const want = @min(buf.len, limit - offset);
+        const n = reader.readSliceShort(buf[0..want]) catch |err| {
             std.log.err("Thread {}: read error: {any}", .{ ctx.id, err });
+            ctx.failed.store(true, .monotonic);
             break;
         };
-        if (n == 0) break;
-        ctx.file.writePositionalAll(ctx.io, buf[0..n], offset) catch |err| {
+        if (n == 0) {
+            // Premature EOF: the chunk is incomplete; do NOT report success.
+            ctx.failed.store(true, .monotonic);
+            break;
+        }
+        ctx.file.pwriteAll(buf[0..n], offset) catch |err| {
             std.log.err("Thread {}: write error at offset {}: {any}", .{ ctx.id, offset, err });
+            ctx.failed.store(true, .monotonic);
             break;
         };
         offset += n;
         ctx.progress.store(offset - ctx.start, .monotonic);
     }
-    // Ensure 100% on exit
-    ctx.progress.store(ctx.end - ctx.start + 1, .monotonic);
+    // Ensure 100% on exit (only when the chunk fully succeeded).
+    if (!ctx.failed.load(.monotonic)) {
+        ctx.progress.store(ctx.end - ctx.start + 1, .monotonic);
+    }
 }

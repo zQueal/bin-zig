@@ -1,194 +1,173 @@
 # bin-zig - Effortless Binary Manager (Zig port)
 
-A lightweight, fast, cross-platform binary manager written in Zig. This project is a port of the original [marcosnils/bin](https://github.com/marcosnils/bin) projects, aimed at providing the same convenience with zero dependencies and high performance.
+A lightweight, cross-platform binary manager written in Zig — a port of
+[marcosnils/bin](https://github.com/marcosnils/bin) (the reference
+implementation in `bin-python/`). It mirrors the reference's functionality:
+the same commands, flags, JSON config format and providers, built with zero
+runtime dependencies and Zig 0.15.2.
 
-## 🚀 Features
+## Requirements
 
-- **Multi-Provider Support**: Fully integrated with **GitHub**, **GitLab**, and **Codeberg**.
-- **Ultra-Fast Transfers**: Multi-threaded downloader using HTTP range requests.
-- **Security First**: Automatic SHA256 integrity verification for all downloads.
-- **Smart Asset Selection**: Automatically detects OS and Architecture to find the best match.
-- **Native Extraction**: In-binary support for `.zip`, `.tar.gz`, `.tar.xz`, `.tar.zst`, and `.tar.lzma`.
-- **Full Lifecycle**: Commands to `list`, `update`, `remove`, `ensure`, and `pin` binaries.
+- [Zig](https://ziglang.org/download/) **0.15.2 or later** (the code targets
+  the 0.15.2 std library; newer 0.15.x patches work, 0.16+ is not supported).
 
-## 📦 Installation
-
-### Build using Just
-
-If you have [just](https://github.com/casey/just) installed:
+## Build
 
 ```bash
-# 1. Bootstrap Zig (if not already installed)
-just install-zig
+# Windows / macOS / Linux
+zig build -Doptimize=ReleaseSafe        # binary at zig-out/bin/bin
 
-# 2. Build optimized binary
-just build
+# cross-compile to Linux from anywhere
+zig build -Dtarget=x86_64-linux
+zig build -Dtarget=aarch64-linux
 ```
 
-> **Note**: You MUST have Zig installed or bootstrapped via the command above before attempting to build the project.
+`zig build test` runs the unit test suite (config, providers, assets, checksum).
 
-### Build from source (Manual)
+On Windows you can also use `just install-zig` to fetch Zig 0.15.2 and
+`just build`.
 
-Ensure you have [Zig](https://ziglang.org/download/) installed (0.16.0-dev or later recommended).
+## Usage
+
+```
+bin [command]
+
+Commands:
+  ensure    Ensures that all binaries listed in the configuration are present
+  install   Installs the specified binary from a url
+  list      List binaries managed by bin
+  pin       Pins current version of the binaries
+  prune     Prunes binaries that no longer exist in the system
+  remove    Removes binaries managed by bin
+  unpin     Unpins current version of the binaries
+  update    Updates one or multiple binaries managed by bin
+  clean     Clears the download cache (zig extension)
+  info      Shows API rate limit information (zig extension)
+
+Flags:
+      --debug   Enable debug mode
+  -h, --help    help for bin
+  -v, --version version for bin
+```
+
+Running `bin` with no arguments lists the managed binaries. Aliases match the
+reference: `install`/`i`, `update`/`u`, `ensure`/`e`, `list`/`ls`,
+`remove`/`rm`.
+
+### install
+
+```
+bin install <url> [name | path] [-f] [-a] [-p provider] [-n pattern]
+```
+
+- `-f, --force` overwrite the file if it already exists
+- `-a, --all` show all possible download options (skip scoring & filtering)
+- `-p, --provider` force a specific provider (github, gitlab, codeberg,
+  hashicorp, helm, goinstall, docker)
+- `-n, --name` glob pattern selecting a specific asset (use `asset/file` to
+  select inside archives)
+
+The second argument is a file name (joined with the default download path) or
+a path. Supported URL forms:
 
 ```bash
-git clone https://github.com/user/bin-zig
-cd bin-zig
-zig build -Doptimize=ReleaseSafe
+bin install https://github.com/cli/cli
+bin install github.com/junegunn/fzf
+bin install gitlab.com/gitlab-org/cli
+bin install codeberg.org/mergiraf/mergiraf
+bin install releases.hashicorp.com/terraform
+bin install get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz
+bin install goinstall://github.com/charmbracelet/glow
+bin install docker://hashicorp/terraform
 ```
 
-The executable will be located in `zig-out/bin/bin`.
+Specific versions can be pinned with an `@tag` suffix
+(`bin install github.com/junegunn/fzf@v0.70.0`) — unlike the reference, the
+`@tag` is parsed out of the repo name so updates keep working (the
+"breaking updates" fix).
 
-## 📚 Commands Reference
+### update
 
-| Command                     | Description                                | Example                                  |
-| --------------------------- | ------------------------------------------ | ---------------------------------------- |
-| `bin install <url> [path]` | Install binary from GitHub, GitLab, or Codeberg  | `bin install cli/cli --as gh -a`         |
-| `bin list`                  | List installed binaries and versions       | `bin list`                               |
-| `bin update <name...>`      | Update specific binaries                   | `bin update gh kubectl`                 |
-| `bin update --all`          | Update all managed binaries                | `bin update --all`                       |
-| `bin remove <name...>`      | Remove managed binaries (works with .exe)  | `bin remove gh kubectl fzf`              |
-| `bin ensure`                | Reinstall any missing binaries             | `bin ensure`                             |
-| `bin pin <name...>`         | Lock binaries to their current version    | `bin pin terraform kubectl`              |
-| `bin unpin <name...>`       | Unlock binaries for updates                | `bin unpin terraform kubectl`            |
-| `bin info`                  | Show API rate limit information            | `bin info`                               |
-| `bin prune`                 | Remove dead entries from configuration     | `bin prune`                              |
-| `bin clean`                 | Clear download/extraction cache            | `bin clean`                              |
-| `bin help [command]`       | Show help for any command                     | `bin help install`                          |
-
-**Tip**: You can install specific versions using the `@` syntax: `bin install github.com/cli/cli@v2.40.1`.
-
-**Multiple Operations**: You can perform operations on multiple binaries at once:
-
-```bash
-# Remove multiple binaries
-bin remove gh kubectl fzf
-
-# Pin multiple binaries
-bin pin terraform kubectl
-
-# Update multiple binaries
-bin update gh kubectl
-
-# Unpin multiple binaries
-bin unpin terraform kubectl
+```
+bin update [binary_path...] [--dry-run] [-y] [-a] [-p] [-c] [-x pattern...]
 ```
 
-The commands will process all binaries and report a summary of successes and failures. If all operations fail, an error is returned. If some succeed and some fail, a warning is displayed.
+Checks for newer versions (semver-aware), asks for confirmation, then
+re-installs. `--dry-run` exits with code 3 when updates are found, `-y` skips
+the prompt, `-c` continues on error, `-x` excludes binaries.
 
-## 🚩 Flags Reference
+### Other commands
 
-### Install Command Flags
+- `bin ensure` re-installs binaries whose file is missing or whose SHA-256 no
+  longer matches the stored hash (keeps the pinned state).
+- `bin pin <name|path...>` / `bin unpin` — pinned binaries are skipped by
+  `update` (unless explicitly listed).
+- `bin prune [-f]` removes config entries for binaries missing from disk
+  (asks for confirmation unless `-f`).
+- `bin remove <name|path...>` removes the binary and its config entry.
 
-| Flag            | Arguments | Description |
-| --------------- | --------- | ----------- |
-| `--as`          | `<name>`  | Install the binary with a custom alias name instead of using the repository name |
-| `-a`            | -         | Interactive mode - prompts you to manually select from available assets when multiple are found |
-| `--all-assets`  | -         | Same as `-a` - interactive mode for asset selection |
-| `--provider`    | `<type>`  | Explicitly specify provider: github, gitlab, or codeberg |
+## Configuration
 
-**URL Formats**:
-You can use three different URL formats when installing:
+The configuration is JSON, byte-compatible with the reference implementation:
 
-1. **Full URL** (auto-detects provider):
-
-   ```bash
-   bin install https://github.com/cli/cli
-   bin install https://gitlab.com/gitlab-org/cli
-   bin install https://codeberg.org/mergiraf/mergiraf
-   ```
-
-2. **Domain format** (auto-detects provider):
-
-   ```bash
-   bin install github.com/cli/cli
-   bin install gitlab.com/gitlab-org/cli
-   bin install codeberg.org/mergiraf/mergiraf
-   ```
-
-3. **Short format** (defaults to GitHub):
-
-   ```bash
-   bin install cli/cli
-   ```
-
-4. **Short format with explicit provider**:
-
-   ```bash
-   bin install --provider gitlab gitlab-org/cli
-   bin install --provider codeberg mergiraf/mergiraf
-   ```
-
-**Custom Install Path**:
-You can specify a custom installation directory (absolute or relative):
-
-```bash
-# Absolute path
-bin install cli/cli /usr/local/bin/gh
-
-# Relative path (converted to absolute)
-bin install cli/cli ~/bin/gh
-bin install cli/cli ./bin/gh
+```json
+{
+    "default_path": "/home/user/.local/bin",
+    "bins": {
+        "/home/user/.local/bin/gh": {
+            "path": "/home/user/.local/bin/gh",
+            "remote_name": "gh",
+            "version": "v2.40.0",
+            "hash": "ae2a4e100870f9798359c035f6338add9e5dcc727545e7daa110acfa4a03e979",
+            "url": "github.com/cli/cli",
+            "provider": "github",
+            "package_path": "bin/gh",
+            "selected_asset": "gh_2.40.0_linux_amd64.tar.gz",
+            "pinned": false
+        }
+    }
+}
 ```
 
-> **Note**: The install path must exist and be writable.
+Resolution order (same as the reference):
 
-**When to use `-a` (Interactive Asset Selection)**:
+1. `BIN_CONFIG` environment variable (the file must exist)
+2. `$HOME/.bin/config.json` (legacy location)
+3. `$XDG_CONFIG_HOME/bin/config.json` when `XDG_CONFIG_HOME` is set
+4. `$HOME/.config/bin/config.json` when `$HOME/.config` exists
+5. default `$HOME/.bin/config.json`
 
-- By default, `bin-zig` automatically selects the best matching asset based on your OS and architecture
-- Use `-a` when you want to manually choose a different asset (e.g., a different architecture, build variant, or special distribution)
-- This is particularly useful when:
-  - Multiple build variants are available (e.g., static vs dynamic linking)
-  - You need a specific architecture (e.g., musl vs glibc on Linux)
-  - The automatic selection doesn't pick the asset you want
+On first run the default download path is auto-detected from the first
+writable directory in `PATH` (interactively picked, or prompted for manually).
+Paths in the config may contain `$VAR`/`${VAR}` expansions.
 
-**Example**:
+Auth tokens are read from the environment (same names as the reference):
+`GITHUB_TOKEN` (or `GITHUB_AUTH_TOKEN`), `GITLAB_TOKEN` (plus
+`GITLAB_TOKEN_<hostname>` for self-hosted), `CODEBERG_TOKEN`, and the GHES
+triple `GHES_BASE_URL`/`GHES_UPLOAD_URL`/`GHES_AUTH_TOKEN`.
 
-```bash
-# Install GitHub CLI as 'gh' and interactively select the asset
-bin install cli/cli --as gh -a
-```
+## Providers
 
-### Update Command Flags
+- **github** — release assets; `?filter=` glob over release tags supported
+- **gitlab** — project packages, release asset links and release-description
+  links; self-hosted instances via the URL hostname
+- **codeberg** — Gitea/Forgejo releases; self-hosted instances supported
+- **hashicorp** — `releases.hashicorp.com` (semver-aware latest)
+- **helm** — `get.helm.sh` (static platform matrix)
+- **goinstall** — builds a Go module via `go install module@version`
+- **docker** — `docker://` images; installs a wrapper script that runs the
+  image with the current directory mounted (the pull shells out to the
+  `docker` CLI rather than the daemon SDK)
 
-| Flag        | Arguments | Description |
-| ----------- | --------- | ----------- |
-| `--all`     | -         | Update all managed binaries to their latest available versions |
+## Notes vs. the reference
 
-### Global Flags
+- The update bug fixed here (never upstreamed): `user/repo@tag` URLs no longer
+  break `bin update` — the tag is split from the repo with the *last* `@`, and
+  short/domain/full URL forms all round-trip correctly.
+- `clean` and `info` are zig extensions (not present in the reference).
+- `bzip2`-compressed releases require a `bzip2` binary on PATH (the Zig std
+  library dropped bzip2 in 0.15).
 
-| Flag               | Arguments | Description |
-| ------------------ | --------- | ----------- |
-| `-h`               | -         | Display help information and exit |
-| `--help`           | -         | Same as `-h` |
-| `-v`               | -         | Output version information and exit |
-| `--version`        | -         | Same as `-v` |
+## License
 
-## 🔧 Configuration
-
-Settings are stored in `~/.config/bin.yml`.
-
-```yaml
-bin_dir: C:\Utilities\exe
-download_threads: 4
-tokens:
-  github: your_github_token
-  gitlab: your_gitlab_token
-  codeberg: your_codeberg_token
-```
-
-## 📁 Default Locations
-
-If `bin_dir` is not specified in your config:
-
-- **Windows**: `%LOCALAPPDATA%\bin` (e.g., `C:\Users\Name\AppData\Local\bin`)
-- **Linux/macOS**: `~/.local/bin`
-
-## 🔮 Future Possibilities
-
-- **Self-Update**: A command to automatically update `bin-zig` to the latest version.
-- **Rollback**: Support for rolling back to previously installed versions.
-
-## 📄 License
-
-This project is licensed under the MIT License.
+MIT

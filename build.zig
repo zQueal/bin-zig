@@ -139,15 +139,15 @@ pub fn build(b: *std.Build) void {
     const run_test_config = b.addRunArtifact(test_config);
 
     // Test: Providers
-    const install_mod = b.createModule(.{
-        .root_source_file = b.path("src/install.zig"),
+    const providers_mod = b.createModule(.{
+        .root_source_file = b.path("src/providers.zig"),
         .target = target,
     });
     const test_providers_mod = b.createModule(.{
         .root_source_file = b.path("src/tests/test_providers.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "install", .module = install_mod },
+            .{ .name = "providers", .module = providers_mod },
         },
     });
     const test_providers = b.addTest(.{

@@ -1,34 +1,31 @@
 const std = @import("std");
 const config = @import("config.zig");
+const prompt = @import("prompt.zig");
 
-pub fn prune(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.Environ, io: std.Io) !void {
-    std.log.info("Pruning configuration...", .{});
+/// Mirrors cmd/prune.go: removes config entries whose binary is missing from
+/// disk, asking for confirmation unless --force.
+pub fn prune(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.EnvMap, force: bool) !void {
+    var to_del = std.ArrayList([]const u8).empty;
+    defer to_del.deinit(allocator);
+
     var it = conf.bins.iterator();
-    var to_remove: std.ArrayList([]const u8) = .empty;
-    defer to_remove.deinit(allocator);
-
     while (it.next()) |entry| {
-        const bin = entry.value_ptr.*;
-        const f = std.Io.Dir.openFileAbsolute(io, bin.path, .{}) catch |err| {
-            if (err == error.FileNotFound) {
-                std.log.info("Binary {s} missing at {s}, removing from config.", .{ bin.remote_name, bin.path });
-                try to_remove.append(allocator, entry.key_ptr.*);
-            } else {
-                std.log.warn("Could not verify binary {s} at {s}: {}", .{ bin.remote_name, bin.path, err });
-            }
-            continue;
-        };
-        f.close(io);
+        const b = entry.value_ptr.*;
+        const ep = try config.expandEnv(allocator, b.path, env);
+        defer allocator.free(ep);
+        if (std.fs.cwd().statFile(ep)) |_| {
+            // exists
+        } else |_| {
+            std.log.info("{s} not found removing", .{ep});
+            try to_del.append(allocator, b.path);
+        }
     }
 
-    for (to_remove.items) |key| {
-        _ = conf.bins.remove(key);
+    if (to_del.items.len == 0) return;
+
+    if (!force) {
+        try prompt.confirm("The following paths will be removed. Continue?");
     }
 
-    if (to_remove.items.len > 0) {
-        try config.save(conf, env, io);
-        std.log.info("Pruned {} entries.", .{to_remove.items.len});
-    } else {
-        std.log.info("Nothing to prune.", .{});
-    }
+    try config.removeBinaries(conf, to_del.items);
 }

@@ -1,158 +1,121 @@
 const std = @import("std");
 const config = @import("config");
 
-test "config: Config init sets default values" {
+test "config: Config init sets empty state" {
     const allocator = std.testing.allocator;
     var conf = config.Config.init(allocator);
     defer conf.deinit();
 
-    try std.testing.expectEqual(@as(u32, 4), conf.download_threads);
     try std.testing.expectEqual(@as(usize, 0), conf.bins.count());
+    try std.testing.expectEqual(@as(usize, 0), conf.default_path.len);
 }
 
-test "config: validate detects empty bin_dir" {
+test "config: expandEnv expands $VAR and ${VAR}" {
     const allocator = std.testing.allocator;
-    var conf = config.Config.init(allocator);
-    defer conf.deinit();
+    var env = std.process.EnvMap.init(allocator);
+    defer env.deinit();
+    try env.put("HOME", "/home/test");
 
-    // bin_dir is empty by default after init
-    // Note: Validation requires std.Io which is not available in simple unit tests
-    // This test verifies the empty bin_dir check logic
-    if (conf.bin_dir.len == 0) {
-        try std.testing.expect(true);
-    } else {
-        try std.testing.expect(false);
-    }
+    const out = try config.expandEnv(allocator, "$HOME/.bin", env);
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("/home/test/.bin", out);
+
+    const out2 = try config.expandEnv(allocator, "${HOME}/bin", env);
+    defer allocator.free(out2);
+    try std.testing.expectEqualStrings("/home/test/bin", out2);
+
+    const out3 = try config.expandEnv(allocator, "no-vars", env);
+    defer allocator.free(out3);
+    try std.testing.expectEqualStrings("no-vars", out3);
 }
 
-test "config: validate detects invalid thread count" {
+test "config: save/load round-trips the JSON schema" {
     const allocator = std.testing.allocator;
 
-    var conf = config.Config.init(allocator);
-    defer conf.deinit();
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
 
-    // Set up a valid bin_dir first (won't pass validation but will get past bin_dir check)
-    conf.bin_dir = "/nonexistent/bin";
+    const dir_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const config_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, "config.json" });
+    defer allocator.free(config_path);
 
-    // Test invalid thread count (0)
-    conf.download_threads = 0;
-    if (conf.download_threads == 0) {
-        try std.testing.expect(true);
-    } else {
-        try std.testing.expect(false);
+    // Create the file so getConfigPath accepts BIN_CONFIG, with a default
+    // path already set (avoids the interactive default-path prompt).
+    {
+        const f = try std.fs.cwd().createFile(config_path, .{});
+        defer f.close();
+        try f.writeAll("{\n    \"default_path\": \"/tmp/bin\",\n    \"bins\": {}\n}");
     }
 
-    // Test invalid thread count (33)
-    conf.download_threads = 33;
-    if (conf.download_threads == 0 or conf.download_threads > 32) {
-        try std.testing.expect(true);
-    } else {
-        try std.testing.expect(false);
+    var env = std.process.EnvMap.init(allocator);
+    defer env.deinit();
+    try env.put("BIN_CONFIG", config_path);
+
+    {
+        var conf = try config.load(allocator, env);
+        defer conf.deinit();
+        try conf.bins.put("/usr/bin/gh", .{
+            .path = "/usr/bin/gh",
+            .remote_name = "gh",
+            .version = "v2.40.0",
+            .hash = "abc123",
+            .url = "https://github.com/cli/cli",
+            .provider = "github",
+            .package_path = "bin/gh",
+            .selected_asset = "gh_2.40.0_linux_amd64.tar.gz",
+            .pinned = true,
+        });
+        try config.save(&conf);
     }
 
-    // Test valid thread count
-    conf.download_threads = 8;
-    if (conf.download_threads > 0 and conf.download_threads <= 32) {
-        try std.testing.expect(true);
-    } else {
-        try std.testing.expect(false);
-    }
-}
-
-test "config: validate detects missing binary fields" {
-    const allocator = std.testing.allocator;
-
-    var conf = config.Config.init(allocator);
-    defer conf.deinit();
-
-    const arena = conf.arena.allocator();
-
-    // Set up a valid bin_dir (won't pass validation but will get past bin_dir check)
-    conf.bin_dir = "/nonexistent/bin";
-    conf.download_threads = 4;
-
-    // Test missing path
-    try conf.bins.put(try arena.dupe(u8, "test1"), .{
-        .path = "",
-        .remote_name = "test1",
-        .version = "v1.0.0",
-        .url = "https://example.com/repo",
-        .provider = "github",
-        .pinned = false,
-    });
-    const bin1 = conf.bins.get("test1").?;
-    if (bin1.path.len == 0) {
-        try std.testing.expect(true);
-    } else {
-        try std.testing.expect(false);
-    }
-
-    // Remove invalid entry
-    _ = conf.bins.remove("test1");
-
-    // Test missing url
-    try conf.bins.put(try arena.dupe(u8, "test2"), .{
-        .path = "/path/to/test2",
-        .remote_name = "test2",
-        .version = "v1.0.0",
-        .url = "",
-        .provider = "github",
-        .pinned = false,
-    });
-    const bin2 = conf.bins.get("test2").?;
-    if (bin2.url.len == 0) {
-        try std.testing.expect(true);
-    } else {
-        try std.testing.expect(false);
-    }
-
-    // Remove invalid entry
-    _ = conf.bins.remove("test2");
-
-    // Test missing version
-    try conf.bins.put(try arena.dupe(u8, "test3"), .{
-        .path = "/path/to/test3",
-        .remote_name = "test3",
-        .version = "",
-        .url = "https://example.com/repo",
-        .provider = "github",
-        .pinned = false,
-    });
-    const bin3 = conf.bins.get("test3").?;
-    if (bin3.version.len == 0) {
-        try std.testing.expect(true);
-    } else {
-        try std.testing.expect(false);
+    {
+        var conf = try config.load(allocator, env);
+        defer conf.deinit();
+        const b = conf.bins.get("/usr/bin/gh") orelse return error.TestFailed;
+        try std.testing.expectEqualStrings("gh", b.remote_name);
+        try std.testing.expectEqualStrings("v2.40.0", b.version);
+        try std.testing.expectEqualStrings("abc123", b.hash);
+        try std.testing.expectEqualStrings("bin/gh", b.package_path);
+        try std.testing.expectEqualStrings("gh_2.40.0_linux_amd64.tar.gz", b.selected_asset);
+        try std.testing.expect(b.pinned);
     }
 }
 
-test "config: validate accepts valid config" {
+test "config: getConfigPath resolution honors BIN_CONFIG" {
     const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const dir_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const config_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, "myconf.json" });
+    defer allocator.free(config_path);
+    const f = try std.fs.cwd().createFile(config_path, .{});
+    f.close();
 
+    var env = std.process.EnvMap.init(allocator);
+    defer env.deinit();
+    try env.put("BIN_CONFIG", config_path);
+    const out = try config.getConfigPath(allocator, env);
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings(config_path, out);
+}
+
+test "config: getBinPath finds managed binaries by basename" {
+    const allocator = std.testing.allocator;
     var conf = config.Config.init(allocator);
     defer conf.deinit();
-
-    const arena = conf.arena.allocator();
-
-    // Create a valid binary entry
-    try conf.bins.put(try arena.dupe(u8, "test"), .{
-        .path = "/path/to/test",
-        .remote_name = "test",
-        .version = "v1.0.0",
-        .url = "https://example.com/repo",
+    try conf.bins.put("/home/u/.local/bin/gh", .{
+        .path = "/home/u/.local/bin/gh",
+        .remote_name = "gh",
+        .version = "v2.40.0",
+        .url = "https://github.com/cli/cli",
         .provider = "github",
-        .pinned = false,
     });
 
-    // bin_dir will still cause failure since it doesn't exist
-    // We just verify that validation accepts the binary entry structure
-    conf.bin_dir = "/nonexistent/bin";
-    conf.download_threads = 4;
-
-    // Verify all required fields are present
-    const bin = conf.bins.get("test").?;
-    try std.testing.expect(bin.path.len > 0);
-    try std.testing.expect(bin.url.len > 0);
-    try std.testing.expect(bin.version.len > 0);
-    try std.testing.expect(conf.download_threads > 0 and conf.download_threads <= 32);
+    var env = std.process.EnvMap.init(allocator);
+    defer env.deinit();
+    const out = try config.getBinPath(allocator, &conf, env, "gh");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("/home/u/.local/bin/gh", out);
 }
