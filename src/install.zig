@@ -33,7 +33,7 @@ pub fn install(allocator: std.mem.Allocator, conf: *config.Config, env: std.proc
         final_path = try std.fs.path.join(allocator, &[_][]const u8{ final_path, file_name });
     }
 
-    const hash = try saveToDisk(allocator, env, p_result.data, final_path, opts.force);
+    const hash = try saveToDisk(allocator, env, p_result.name, p_result.version, p_result.data, final_path, opts.force);
 
     // Convert to absolute path before storing in config.
     const abs_path = try std.fs.path.resolve(allocator, &[_][]const u8{final_path});
@@ -60,7 +60,7 @@ fn isDir(path: []const u8) bool {
 
 /// saveToDisk writes the data atomically via ".new"/".old" siblings and
 /// returns the hex SHA-256 of the written bytes (mirrors cmd/saveToDisk).
-pub fn saveToDisk(allocator: std.mem.Allocator, env: std.process.EnvMap, data: []const u8, path: []const u8, overwrite: bool) ![]const u8 {
+pub fn saveToDisk(allocator: std.mem.Allocator, env: std.process.EnvMap, name: []const u8, version: []const u8, data: []const u8, path: []const u8, overwrite: bool) ![]const u8 {
     const epath = try config.expandEnv(allocator, path, env);
     const dir = std.fs.path.dirname(epath) orelse ".";
     const base = std.fs.path.basename(epath);
@@ -69,7 +69,7 @@ pub fn saveToDisk(allocator: std.mem.Allocator, env: std.process.EnvMap, data: [
     const new_path = try std.fmt.allocPrint(allocator, "{s}{c}.{s}.new", .{ dir, sep, base });
     const old_path = try std.fmt.allocPrint(allocator, "{s}{c}.{s}.old", .{ dir, sep, base });
 
-    std.log.info("Copying for {s} into {s}", .{ base, epath });
+    std.log.info("Copying for {s}@{s} into {s}", .{ name, version, epath });
 
     // Write to a temp .new file first to allow atomic replacement. This is
     // required on Windows where in-place writes to running binaries fail.

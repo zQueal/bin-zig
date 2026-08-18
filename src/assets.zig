@@ -239,6 +239,7 @@ pub const Filter = struct {
     pub fn processURL(self: *Filter, allocator: std.mem.Allocator, client: *std.http.Client, gf: FilteredAsset) !ProcessedFile {
         self.name = gf.name;
         std.log.debug("Checking binary from {s}", .{gf.url});
+        std.log.info("Starting download of {s}", .{gf.url});
         const data = try download_mod.downloadToMemory(allocator, client, gf.url, gf.extra_headers);
         return self.processBytes(allocator, data);
     }
@@ -644,6 +645,10 @@ pub fn sanitizeName(allocator: std.mem.Allocator, name: []const u8, version: []c
     // replacements do not overlap.
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
+    defer {
+        // The replacement strings are owned; free them (no-op on arenas).
+        for (reps.items) |r| allocator.free(r.from);
+    }
     var i: usize = 0;
     while (i < lower.len) {
         var matched = false;
@@ -779,25 +784,40 @@ fn matchClassEnd(pattern: []const u8, start: usize) usize {
 
 const testing = std.testing;
 
-test "assets: sanitizeName strips os/arch/version tokens" {
+test "assets: sanitizeName strips arch tokens (platform-independent)" {
     const allocator = testing.allocator;
-    const out = try sanitizeName(allocator, "bin_amd64_linux", "v0.0.1");
+    // "amd64"/"x64" appear in the arch keyword list on every platform.
+    const out = try sanitizeName(allocator, "bin_amd64", "v0.0.1");
     defer allocator.free(out);
     try testing.expectEqualStrings("bin", out);
 }
 
 test "assets: sanitizeName keeps extensions" {
     const allocator = testing.allocator;
-    const out = try sanitizeName(allocator, "launchpad-win-x64.exe", "v1.0.0");
+    const out = try sanitizeName(allocator, "launchpad-x64.exe", "v1.0.0");
     defer allocator.free(out);
     try testing.expectEqualStrings("launchpad.exe", out);
 }
 
 test "assets: sanitizeName strips version with and without v" {
     const allocator = testing.allocator;
-    const out = try sanitizeName(allocator, "mytool-v1.2.3-linux-amd64", "v1.2.3");
+    const out = try sanitizeName(allocator, "mytool-v1.2.3-amd64", "v1.2.3");
     defer allocator.free(out);
     try testing.expectEqualStrings("mytool", out);
+}
+
+test "assets: sanitizeName is platform-scoped like the reference" {
+    const allocator = testing.allocator;
+    // On a Windows build the "linux" keyword is not in the OS list, so the
+    // "-linux" token survives — exactly like the Go implementation.
+    const builtin = @import("builtin");
+    const out = try sanitizeName(allocator, "tool-linux-amd64", "v1.0.0");
+    defer allocator.free(out);
+    if (builtin.os.tag == .windows) {
+        try testing.expectEqualStrings("tool-linux", out);
+    } else {
+        try testing.expectEqualStrings("tool", out);
+    }
 }
 
 test "assets: isSupportedExt rejects checksum and text files" {

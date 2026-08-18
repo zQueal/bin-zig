@@ -7,7 +7,7 @@ fn stdoutWriter() std.fs.File.Writer {
 
 /// Reads one line from stdin, trimming trailing whitespace. Returns null on EOF.
 fn readLine(allocator: std.mem.Allocator) !?[]const u8 {
-    var buf: [1]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     var stdin = std.fs.File.stdin().reader(&buf);
     const line = try stdin.interface.takeDelimiter('\n') orelse return null;
     return try allocator.dupe(u8, std.mem.trimRight(u8, line, " \t\r\n"));

@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli = @import("cli.zig");
 const utils = @import("utils.zig");
 
 pub const DownloadOptions = struct {
@@ -66,7 +67,34 @@ pub fn downloadToMemory(allocator: std.mem.Allocator, client: *std.http.Client, 
     var decompress: std.http.Decompress = undefined;
     var transfer_buffer: [8192]u8 = undefined;
     var reader = resp.readerDecompressing(&transfer_buffer, &decompress, &decompress_buf);
-    return reader.allocRemaining(allocator, .limited(max_memory_download));
+
+    const total_size = resp.head.content_length orelse 0;
+    var bar = cli.ProgressBar.init(total_size);
+
+    var list = std.ArrayList(u8).empty;
+    errdefer list.deinit(allocator);
+
+    var buf: [16384]u8 = undefined;
+    if (total_size > 0) {
+        // Known length: never read past the end (0.15.x contentLengthStream
+        // panics on post-EOF reads).
+        while (list.items.len < total_size) {
+            const want = @min(buf.len, total_size - list.items.len);
+            const n = try reader.readSliceShort(buf[0..want]);
+            if (n == 0) return error.DownloadFailed; // premature EOF
+            try list.appendSlice(allocator, buf[0..n]);
+            bar.update(list.items.len);
+        }
+    } else {
+        while (true) {
+            const n = try reader.readSliceShort(&buf);
+            if (n == 0) break;
+            try list.appendSlice(allocator, buf[0..n]);
+            bar.update(list.items.len);
+        }
+    }
+    bar.finish(list.items.len);
+    return list.toOwnedSlice(allocator);
 }
 
 const max_memory_download = 4 * 1024 * 1024 * 1024; // 4GB

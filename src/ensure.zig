@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli = @import("cli.zig");
 const config = @import("config.zig");
 const install_mod = @import("install.zig");
 const providers = @import("providers.zig");
@@ -61,7 +62,7 @@ pub fn ensure(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
             return err;
         };
 
-        const hash = try install_mod.saveToDisk(allocator, env, p_result.data, ep, true);
+        const hash = try install_mod.saveToDisk(allocator, env, p_result.name, p_result.version, p_result.data, ep, true);
 
         // Pinned is preserved (unlike update).
         try config.upsertBinary(conf, .{
@@ -76,7 +77,7 @@ pub fn ensure(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
             .pinned = bin_cfg.pinned,
         });
 
-        std.log.info("Done ensuring {s} to {s}", .{ ep, p_result.version });
+        std.log.info("Done ensuring {s} to {s}", .{ ep, cli.green(bin_cfg.version) });
     }
 }
 

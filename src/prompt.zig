@@ -9,7 +9,7 @@ pub fn confirm(message: []const u8) !void {
     try out.interface.print("\n{s} [Y/n] ", .{message});
     try out.interface.flush();
 
-    var in_buf: [1]u8 = undefined;
+    var in_buf: [4096]u8 = undefined;
     var stdin = std.fs.File.stdin().reader(&in_buf);
     const line = try stdin.interface.takeDelimiter('\n') orelse return error.InvalidInput;
     const response = std.mem.trim(u8, line, " \t\r\n");

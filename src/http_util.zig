@@ -13,7 +13,10 @@ pub fn getBody(allocator: std.mem.Allocator, client: *std.http.Client, url: []co
         .extra_headers = extra_headers,
         .headers = .{
             .user_agent = .{ .override = "bin-cli" },
-            .connection = .{ .override = "close" },
+            // Keep-alive (default): the client pools the connection, so a
+            // burst of requests to the same host (e.g. update checks across
+            // many binaries) reuses the TCP+TLS connection instead of doing
+            // a fresh handshake every time.
         },
     });
     defer req.deinit();

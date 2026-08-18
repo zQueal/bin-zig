@@ -172,6 +172,26 @@ pub fn build(b: *std.Build) void {
     });
     const run_test_checksum = b.addRunArtifact(test_checksum);
 
+    // Test: CLI formatting helpers
+    const cli_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli.zig"),
+        .target = target,
+    });
+    const test_cli = b.addTest(.{
+        .root_module = cli_mod,
+    });
+    const run_test_cli = b.addRunArtifact(test_cli);
+
+    // Test: Asset pipeline
+    const assets_mod = b.createModule(.{
+        .root_source_file = b.path("src/assets.zig"),
+        .target = target,
+    });
+    const test_assets = b.addTest(.{
+        .root_module = assets_mod,
+    });
+    const run_test_assets = b.addRunArtifact(test_assets);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -181,6 +201,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_test_config.step);
     test_step.dependOn(&run_test_providers.step);
     test_step.dependOn(&run_test_checksum.step);
+    test_step.dependOn(&run_test_cli.step);
+    test_step.dependOn(&run_test_assets.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

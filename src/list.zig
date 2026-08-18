@@ -1,13 +1,13 @@
 const std = @import("std");
+const cli = @import("cli.zig");
 const config = @import("config.zig");
 
 /// Mirrors cmd/list.go: prints a table of managed binaries with version, URL
-/// and status, sorted by path.
+/// and status, sorted by path. Headers are magenta-italic, status is green
+/// "OK" or red "missing <path>" (fatih/color), matching the reference.
 pub fn list(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.EnvMap) !void {
     var out_buf: [1]u8 = undefined;
     var out = std.fs.File.stdout().writer(&out_buf);
-
-    if (conf.bins.count() == 0) return;
 
     var paths = std.ArrayList([]const u8).empty;
     defer paths.deinit(allocator);
@@ -19,7 +19,7 @@ pub fn list(allocator: std.mem.Allocator, conf: *config.Config, env: std.process
         }
     }.lessThan);
 
-    // Column widths.
+    // Column widths (matching the reference binary's list output).
     var p_len: usize = 0;
     var v_len: usize = 0;
     var u_len: usize = 0;
@@ -28,11 +28,17 @@ pub fn list(allocator: std.mem.Allocator, conf: *config.Config, env: std.process
         const ep = config.expandEnv(allocator, b.path, env) catch b.path;
         defer allocator.free(ep);
         p_len = @max(p_len, ep.len);
-        v_len = @max(v_len, b.version.len + 1);
+        v_len = @max(v_len, b.version.len);
         u_len = @max(u_len, b.url.len);
     }
 
-    const header = try std.fmt.allocPrint(allocator, "\n{s}  {s}  {s}  {s}", .{ padRight(allocator, "Path", p_len), padRight(allocator, " Version", v_len), padRight(allocator, "URL", u_len), "Status" });
+    // Header (magenta italic, matching the reference).
+    const header = try std.fmt.allocPrint(allocator, "\n{s}  {s}  {s}  {s}", .{
+        cli.magentaItalic(padRight(allocator, "Path", p_len)),
+        cli.magentaItalic(padRight(allocator, "Version", v_len)),
+        cli.magentaItalic(padRight(allocator, "URL", u_len)),
+        cli.magentaItalic("Status"),
+    });
     defer allocator.free(header);
     try out.interface.writeAll(header);
 
@@ -43,16 +49,23 @@ pub fn list(allocator: std.mem.Allocator, conf: *config.Config, env: std.process
 
         var status: []const u8 = undefined;
         if (std.fs.cwd().statFile(ep)) |_| {
-            status = "OK";
+            status = cli.green("OK");
         } else |_| {
-            status = "missing";
+            const missing_msg = try std.fmt.allocPrint(allocator, "missing {s}", .{ep});
+            defer allocator.free(missing_msg);
+            status = cli.red(missing_msg);
         }
 
-        const marker = if (b.pinned) "*" else " ";
+        const marker = if (b.pinned) "*" else "";
         const version_col = try std.fmt.allocPrint(allocator, "{s}{s}", .{ marker, b.version });
         defer allocator.free(version_col);
 
-        const row = try std.fmt.allocPrint(allocator, "\n{s}  {s}  {s}  {s}", .{ padRight(allocator, ep, p_len), padRight(allocator, version_col, v_len), padRight(allocator, b.url, u_len), status });
+        const row = try std.fmt.allocPrint(allocator, "\n{s}  {s}  {s}  {s}", .{
+            padRight(allocator, ep, p_len),
+            padRight(allocator, version_col, v_len),
+            padRight(allocator, b.url, u_len),
+            status,
+        });
         defer allocator.free(row);
         try out.interface.writeAll(row);
     }

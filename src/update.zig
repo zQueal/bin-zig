@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli = @import("cli.zig");
 const config = @import("config.zig");
 const install_mod = @import("install.zig");
 const prompt = @import("prompt.zig");
@@ -11,7 +12,6 @@ pub const UpdateOpts = struct {
     all: bool = false,
     skip_path_check: bool = false,
     continue_on_error: bool = false,
-    exclude: []const []const u8 = &.{},
 };
 
 const UpdateInfo = struct {
@@ -49,19 +49,19 @@ pub fn update(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
         }
     }
 
-    // Excluded binaries.
+    // Excluded binaries (matching the reference binary: no --exclude flag).
     var excluded = std.StringHashMap(void).init(allocator);
     defer excluded.deinit();
-    for (opts.exclude) |e| {
-        const bin = config.getBinPath(allocator, conf, env, e) catch continue;
-        try excluded.put(bin, {});
-    }
 
     var to_update = std.ArrayList(struct { info: UpdateInfo, bin: config.Binary, path: []const u8 }).empty;
     defer to_update.deinit(allocator);
     var update_failures = std.ArrayList([]const u8).empty;
     defer update_failures.deinit(allocator);
 
+    // Build the list of binaries that need a network version check (skipping
+    // excluded and pinned ones with the same log lines as the reference).
+    var jobs = std.ArrayList(CheckJob).empty;
+    defer jobs.deinit(std.heap.smp_allocator);
     for (bin_paths.items) |p| {
         const b = bins_to_process.get(p).?;
         if (excluded.contains(p)) {
@@ -72,24 +72,44 @@ pub fn update(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
             std.log.info("{s} is a pinned binary", .{p});
             continue;
         }
-        var provider = providers.Provider.new(allocator, b.url, b.provider) catch |err| {
-            if (opts.continue_on_error) {
-                try update_failures.append(allocator, try std.fmt.allocPrint(allocator, "Error while creating provider for {s}: {s}", .{ p, @errorName(err) }));
-                continue;
-            }
-            return err;
-        };
-        std.log.debug("Using provider '{s}' for '{s}'", .{ provider.getID(), b.url });
+        try jobs.append(std.heap.smp_allocator, .{ .path = p, .bin = b });
+    }
 
-        const ui = getLatestVersion(allocator, &client, &b, &provider) catch |err| {
+    // Check all binaries concurrently: the version checks are independent
+    // network round-trips, so a small thread pool turns ~N seconds of
+    // sequential latency into ~N/parallelism. The workers allocate from the
+    // thread-safe std.heap.smp_allocator (the main arena is not thread-safe).
+    var check_ctx = CheckCtx{
+        .allocator = std.heap.smp_allocator,
+        .conf = conf,
+        .jobs = jobs.items,
+    };
+    const parallelism = @min(jobs.items.len, default_update_parallelism);
+    if (parallelism > 1 and jobs.items.len > 1) {
+        var threads = try std.heap.smp_allocator.alloc(std.Thread, parallelism);
+        defer std.heap.smp_allocator.free(threads);
+        for (0..parallelism) |i| {
+            threads[i] = try std.Thread.spawn(.{}, checkWorker, .{&check_ctx});
+        }
+        for (threads) |t| t.join();
+    } else if (jobs.items.len == 1) {
+        checkWorker(&check_ctx);
+    }
+
+    var results = check_ctx.results;
+    defer results.deinit(std.heap.smp_allocator);
+
+    for (results.items) |r| {
+        const p = r.path;
+        if (r.err) |err| {
             if (opts.continue_on_error) {
                 try update_failures.append(allocator, try std.fmt.allocPrint(allocator, "Error while getting latest version of {s}: {s}", .{ p, @errorName(err) }));
                 continue;
             }
             return err;
-        };
-        if (ui) |info| {
-            try to_update.append(allocator, .{ .info = info, .bin = b, .path = p });
+        }
+        if (r.info) |info| {
+            try to_update.append(allocator, .{ .info = info, .bin = r.bin, .path = p });
         }
     }
 
@@ -137,7 +157,7 @@ pub fn update(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
             return err;
         };
 
-        const hash = try install_mod.saveToDisk(allocator, env, p_result.data, b.path, true);
+        const hash = try install_mod.saveToDisk(allocator, env, p_result.name, p_result.version, p_result.data, b.path, true);
 
         // Note: Pinned is intentionally NOT preserved here (matches the
         // reference implementation).
@@ -154,7 +174,7 @@ pub fn update(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
 
         const expanded = try config.expandEnv(allocator, b.path, env);
         defer allocator.free(expanded);
-        std.log.info("Done updating {s} to {s}", .{ expanded, ui.version });
+        std.log.info("Done updating {s} to {s}", .{ expanded, cli.green(ui.version) });
     }
 
     for (update_failures.items) |f| std.log.warn("{s}", .{f});
@@ -176,6 +196,66 @@ fn getLatestVersion(allocator: std.mem.Allocator, client: *std.http.Client, b: *
     }
 
     std.log.debug("Found new version {s} for {s} at {s}", .{ latest.version, b.path, latest.url });
-    std.log.info("{s} {s} -> {s}", .{ b.path, b.version, latest.version });
+    std.log.info("{s} {s} -> {s} ({s})", .{ b.path, cli.yellow(b.version), cli.green(latest.version), latest.url });
     return .{ .version = latest.version, .url = latest.url };
+}
+
+// ---------------------------------------------------------------------------
+// Parallel update checking
+// ---------------------------------------------------------------------------
+
+const default_update_parallelism = 10;
+
+const CheckJob = struct {
+    path: []const u8,
+    bin: config.Binary,
+};
+
+const CheckResult = struct {
+    path: []const u8,
+    bin: config.Binary,
+    info: ?UpdateInfo = null,
+    err: ?anyerror = null,
+};
+
+const CheckCtx = struct {
+    allocator: std.mem.Allocator,
+    conf: *config.Config,
+    jobs: []const CheckJob,
+    next: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    mutex: std.Thread.Mutex = .{},
+    results: std.ArrayList(CheckResult) = .empty,
+};
+
+fn checkWorker(ctx: *CheckCtx) void {
+    // Each worker gets its own HTTP client: concurrent TLS handshakes on a
+    // shared client race in the 0.15.2 stdlib. Per-worker clients still get
+    // keep-alive reuse across the requests that worker performs.
+    var client = std.http.Client{ .allocator = ctx.allocator };
+    client.ca_bundle.rescan(ctx.allocator) catch return;
+    defer client.deinit();
+
+    while (true) {
+        const i = ctx.next.fetchAdd(1, .monotonic);
+        if (i >= ctx.jobs.len) break;
+        const job = ctx.jobs[i];
+
+        var result = CheckResult{ .path = job.path, .bin = job.bin };
+        var provider = providers.Provider.new(ctx.allocator, job.bin.url, job.bin.provider) catch |err| {
+            result.err = err;
+            ctx.mutex.lock();
+            defer ctx.mutex.unlock();
+            ctx.results.append(ctx.allocator, result) catch {};
+            continue;
+        };
+        std.log.debug("Using provider '{s}' for '{s}'", .{ provider.getID(), job.bin.url });
+
+        result.info = getLatestVersion(ctx.allocator, &client, &job.bin, &provider) catch |err| blk: {
+            result.err = err;
+            break :blk null;
+        };
+        ctx.mutex.lock();
+        defer ctx.mutex.unlock();
+        ctx.results.append(ctx.allocator, result) catch {};
+    }
 }

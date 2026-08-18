@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli = @import("cli.zig");
 const config = @import("config.zig");
 
 /// Mirrors cmd/remove.go.
@@ -9,7 +10,7 @@ pub fn remove(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
     for (names) |name| {
         const bp = config.getBinPath(allocator, conf, env, name) catch |err| switch (err) {
             error.FileNotFound => {
-                std.debug.print("binary {s} not found in PATH, skipping\n", .{name});
+                cli.stderrLine("binary {s} not found in PATH, skipping\n", .{name});
                 continue;
             },
             else => return err,
