@@ -1,8 +1,7 @@
 # bin-zig - Effortless Binary Manager (Zig port)
 
 A lightweight, cross-platform binary manager written in Zig — a port of
-[marcosnils/bin](https://github.com/marcosnils/bin) (the reference
-implementation in `bin-python/`). It mirrors the reference's functionality:
+[marcosnils/bin](https://github.com/marcosnils/bin). It mirrors the references functionality:
 the same commands, flags, JSON config format and providers, built with zero
 runtime dependencies and Zig 0.15.2.
 
