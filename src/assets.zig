@@ -281,11 +281,27 @@ pub const Filter = struct {
 
     fn processGz(self: *Filter, allocator: std.mem.Allocator, data: []const u8) !ProcessedFile {
         var in = std.Io.Reader.fixed(data);
-        const buf = try allocator.alloc(u8, std.compress.flate.max_window_len);
-        defer allocator.free(buf);
-        var decompressor = std.compress.flate.Decompress.init(&in, .gzip, buf);
-        const out = try decompressor.reader.allocRemaining(allocator, .limited(max_processed_bytes));
-        return .{ .data = out, .name = self.name };
+        // Direct mode (empty buffer): flate streams output straight into the
+        // destination writer. The stdlib's internal-buffer path panics with
+        // "reached unreachable code" on deflate streams containing stored
+        // blocks (its internal writer has no rebase). The Allocating writer
+        // grows on demand and implements rebase, so this is always safe.
+        var decompress = std.compress.flate.Decompress.init(&in, .gzip, &.{});
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+
+        var total: u64 = 0;
+        while (true) {
+            const remaining = max_processed_bytes -| total;
+            if (remaining == 0) return error.StreamTooLong;
+            const n = decompress.reader.stream(&out.writer, .limited(remaining)) catch |err| switch (err) {
+                error.EndOfStream => break,
+                error.ReadFailed => return error.ReadFailed,
+                error.WriteFailed => return error.WriteFailed,
+            };
+            total += n;
+        }
+        return .{ .data = try out.toOwnedSlice(), .name = self.name };
     }
 
     fn processXz(self: *Filter, allocator: std.mem.Allocator, data: []const u8) !ProcessedFile {
@@ -413,7 +429,12 @@ pub const Filter = struct {
         defer zip_file.close();
         var r_buf: [8192]u8 = undefined;
         var reader = zip_file.reader(&r_buf);
-        try std.zip.extract(out_dir_handle, &reader, .{ .allow_backslashes = true });
+        // Custom extraction: std.zip.extract uses a flate buffer of exactly
+        // max_window_len, which panics with "reached unreachable code" on
+        // deflate streams that contain stored blocks (the 0.15.2 flate
+        // internal writer has no rebase). A large staging buffer makes the
+        // rebase path unreachable for any realistic block size.
+        try extractZipToDir(allocator, &reader, out_dir_handle);
 
         // Walk the extracted tree collecting relative paths and modes.
         var entries = std.ArrayList(EntryInfo).empty;
@@ -501,6 +522,108 @@ pub const Filter = struct {
 };
 
 const max_processed_bytes = 2 * 1024 * 1024 * 1024; // 2GB decompressed
+
+/// Destination buffer for zip entry decompression in flate direct mode. Must
+/// be at least flate.history_len + the preserved window so the writer's
+/// defaultRebase (drain) can always satisfy the flate writer requests.
+const zip_dest_buffer_size = 256 * 1024;
+
+/// Extracts a zip archive, mirroring std.zip.extract but avoiding the 0.15.2
+/// flate "reached unreachable code" panic: deflate entries are decompressed
+/// in flate direct mode straight into the destination writer, which has a
+/// working (drain/grow) rebase. std.zip's fixed max_window_len internal
+/// buffer instead panics on deflate streams containing stored blocks.
+fn extractZipToDir(allocator: std.mem.Allocator, stream: *std.fs.File.Reader, dest: std.fs.Dir) !void {
+    const dest_buf = try allocator.alloc(u8, zip_dest_buffer_size);
+    defer allocator.free(dest_buf);
+    var iter = try std.zip.Iterator.init(stream);
+
+    var filename_buf: [std.fs.max_path_bytes]u8 = undefined;
+    while (try iter.next()) |entry| {
+        try extractZipEntry(stream, entry, &filename_buf, dest, dest_buf);
+    }
+}
+
+fn extractZipEntry(stream: *std.fs.File.Reader, entry: std.zip.Iterator.Entry, filename_buf: []u8, dest: std.fs.Dir, dest_buf: []u8) !void {
+    if (filename_buf.len < entry.filename_len) return error.ZipInsufficientBuffer;
+    switch (entry.compression_method) {
+        .store, .deflate => {},
+        else => return error.UnsupportedCompressionMethod,
+    }
+
+    // Read the filename from the central directory record.
+    try stream.seekTo(entry.header_zip_offset + @sizeOf(std.zip.CentralDirectoryFileHeader));
+    stream.interface.readSliceAll(filename_buf[0..entry.filename_len]) catch |err| switch (err) {
+        error.ReadFailed => return stream.err.?,
+        error.EndOfStream => return error.EndOfStream,
+    };
+
+    // Read the local file header to locate the compressed data.
+    try stream.seekTo(entry.file_offset);
+    const local = stream.interface.takeStruct(std.zip.LocalFileHeader, .little) catch |err| switch (err) {
+        error.ReadFailed => return stream.err.?,
+        error.EndOfStream => return error.EndOfStream,
+    };
+    if (!std.mem.eql(u8, &local.signature, &std.zip.local_file_header_sig)) return error.ZipInvalid;
+
+    const data_offset = entry.file_offset + @sizeOf(std.zip.LocalFileHeader) + local.filename_len + local.extra_len;
+    try stream.seekTo(data_offset);
+
+    var filename = filename_buf[0..entry.filename_len];
+    std.mem.replaceScalar(u8, filename, '\\', '/');
+    if (isBadZipFilename(filename)) return error.ZipBadFilename;
+
+    // Entries ending in '/' are directories.
+    if (filename[filename.len - 1] == '/') {
+        if (entry.uncompressed_size != 0) return error.ZipBadDirectorySize;
+        try dest.makePath(filename[0 .. filename.len - 1]);
+        return;
+    }
+
+    const out_file = blk: {
+        if (std.fs.path.dirname(filename)) |dirname| {
+            var parent_dir = try dest.makeOpenPath(dirname, .{});
+            defer parent_dir.close();
+            break :blk try parent_dir.createFile(std.fs.path.basename(filename), .{ .exclusive = true });
+        }
+        break :blk try dest.createFile(filename, .{ .exclusive = true });
+    };
+    defer out_file.close();
+    var file_writer = out_file.writer(dest_buf);
+
+    switch (entry.compression_method) {
+        .store => {
+            stream.interface.streamExact64(&file_writer.interface, entry.uncompressed_size) catch |err| switch (err) {
+                error.ReadFailed => return stream.err.?,
+                error.WriteFailed => return file_writer.err.?,
+                error.EndOfStream => return error.ZipDecompressTruncated,
+            };
+        },
+        .deflate => {
+            // Direct mode (empty flate buffer): output streams straight into
+            // the destination writer, whose defaultRebase drains to disk when
+            // the buffer fills. The stdlib's indirect path panics (unreachable
+            // rebase) on deflate streams with stored blocks.
+            var decompress: std.compress.flate.Decompress = .init(&stream.interface, .raw, &.{});
+            decompress.reader.streamExact64(&file_writer.interface, entry.uncompressed_size) catch |err| switch (err) {
+                error.ReadFailed => return stream.err.?,
+                error.WriteFailed => return file_writer.err orelse decompress.err.?,
+                error.EndOfStream => return error.ZipDecompressTruncated,
+            };
+        },
+        else => unreachable,
+    }
+    try file_writer.end();
+}
+
+fn isBadZipFilename(filename: []const u8) bool {
+    if (filename.len == 0 or filename[0] == '/') return true;
+    var it = std.mem.splitScalar(u8, filename, '/');
+    while (it.next()) |part| {
+        if (std.mem.eql(u8, part, "..")) return true;
+    }
+    return false;
+}
 
 fn collectZipEntries(allocator: std.mem.Allocator, dir: []const u8, prefix: []const u8, out: *std.ArrayList(EntryInfo)) !void {
     var d = try std.fs.cwd().openDir(dir, .{ .iterate = true });
