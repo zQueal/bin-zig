@@ -190,7 +190,17 @@ pub const GitHub = struct {
                         html_url = h.string;
                     }
                 }
-        return .{ .version = try allocator.dupe(u8, version), .url = try allocator.dupe(u8, html_url) };
+        return .{ .version = try allocator.dupe(u8, version), .url = try self.urlWithFilter(allocator, html_url) };
+    }
+
+    /// Re-attaches the release filter to the URL that callers persist (`bin
+    /// update` writes it into the config), so a filtered repo keeps selecting the
+    /// same artefact on later runs instead of falling back to the repository's
+    /// latest release. The reference does the same (marcosnils/bin#302).
+    fn urlWithFilter(self: *const GitHub, allocator: std.mem.Allocator, raw_url: []const u8) ![]const u8 {
+        if (self.filter.len == 0) return allocator.dupe(u8, raw_url);
+        const sep: []const u8 = if (std.mem.indexOfScalar(u8, raw_url, '?')) |_| "&" else "?";
+        return std.fmt.allocPrint(allocator, "{s}{s}filter={s}", .{ raw_url, sep, self.filter });
     }
 
     fn findLatestMatchingRelease(self: *const GitHub, allocator: std.mem.Allocator, client: *std.http.Client) !std.json.Value {
@@ -266,4 +276,26 @@ fn getGithubToken(allocator: std.mem.Allocator) ![]const u8 {
 fn globMatch(pattern: []const u8, name: []const u8) bool {
     // Reuse assets.zig's glob matcher via a public wrapper.
     return assets.globMatch(pattern, name);
+}
+
+// A ?filter= URL has to keep its filter in the URL that `bin update` persists,
+// otherwise the next run falls back to the repository's latest release
+// (marcosnils/bin#302).
+test "github: the persisted URL keeps a release filter" {
+    // GitHub.init dupes the parts it parses out of the URI, so an arena keeps
+    // this test from tripping the testing allocator's leak check.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const filtered = try GitHub.init(allocator, try std.Uri.parse("https://github.com/marcosnils/bin?filter=nightly-*"), "github");
+    const with_filter = try filtered.urlWithFilter(allocator, "https://github.com/marcosnils/bin/releases/tag/nightly-1");
+    try std.testing.expectEqualStrings(
+        "https://github.com/marcosnils/bin/releases/tag/nightly-1?filter=nightly-*",
+        with_filter,
+    );
+
+    const plain = try GitHub.init(allocator, try std.Uri.parse("https://github.com/marcosnils/bin"), "github");
+    const unchanged = try plain.urlWithFilter(allocator, "https://github.com/marcosnils/bin/releases/tag/v0.29.3");
+    try std.testing.expectEqualStrings("https://github.com/marcosnils/bin/releases/tag/v0.29.3", unchanged);
 }

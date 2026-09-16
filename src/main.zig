@@ -12,7 +12,9 @@ const prune_cmd = @import("prune.zig");
 const clean_cmd = @import("clean.zig");
 const info_cmd = @import("info.zig");
 
-const version_string = "dev";
+/// Reported by `bin -v/--version` (and in `--debug` output). Keep it in sync
+/// with `.version` in build.zig.zon when releasing.
+const version_string = @import("version.zig").string;
 
 pub const std_options: std.Options = .{
     .log_level = .debug,

@@ -202,6 +202,16 @@ pub fn build(b: *std.Build) void {
     });
     const run_test_download = b.addRunArtifact(test_download);
 
+    // Test: github provider helpers (filter persistence)
+    const github_mod = b.createModule(.{
+        .root_source_file = b.path("src/github.zig"),
+        .target = target,
+    });
+    const test_github = b.addTest(.{
+        .root_module = github_mod,
+    });
+    const run_test_github = b.addRunArtifact(test_github);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -214,6 +224,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_test_cli.step);
     test_step.dependOn(&run_test_assets.step);
     test_step.dependOn(&run_test_download.step);
+    test_step.dependOn(&run_test_github.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

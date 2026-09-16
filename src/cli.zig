@@ -187,6 +187,9 @@ pub const ProgressBar = struct {
     total: u64,
     started: i128 = 0,
     last_render: i128 = 0,
+    /// Width of the last line written, so a shorter next line can blank out
+    /// whatever is left of it on screen.
+    last_len: usize = 0,
     active: bool = false,
 
     pub fn init(total: u64) ProgressBar {
@@ -226,10 +229,26 @@ pub const ProgressBar = struct {
         const file = std.fs.File.stderr();
         var out_buf: [1]u8 = undefined;
         var w2 = file.writer(&out_buf);
-        w2.interface.print("\r{s}", .{line}) catch return;
-        w2.interface.flush() catch return;
+        emitLine(&w2.interface, line, self.last_len) catch return;
+        self.last_len = line.len;
     }
 };
+
+/// Writes one progress line over the previous one.
+///
+/// `\r` only moves the cursor to the start of the line, so a line that is
+/// shorter than its predecessor leaves the tail of the longer one on screen:
+/// the finished render drops the " ETA <duration>" suffix, which used to leave
+/// leftover text ghosting next to the final `100.00%`. Padding the line back to
+/// the previous width clears it, and works on consoles without ANSI erase
+/// support (a bare `\x1b[K` would print literally there).
+fn emitLine(w: *std.Io.Writer, line: []const u8, previous_len: usize) !void {
+    try w.writeAll("\r");
+    try w.writeAll(line);
+    var pad = previous_len -| line.len;
+    while (pad > 0) : (pad -= 1) try w.writeAll(" ");
+    try w.flush();
+}
 
 /// Builds one progress bar line: "{counters} {bar} {percent} {speed} ETA {dur}".
 fn renderLine(buf: *[512]u8, total: u64, current: u64, finished: bool, elapsed_s: f64) []const u8 {
@@ -352,6 +371,21 @@ fn durationString(buf: []u8, seconds_f: f64) []const u8 {
 }
 
 const testing = std.testing;
+
+// `\r` only moves the cursor to the start of the line, so a render that is
+// shorter than its predecessor leaves the tail of the longer one behind. The
+// finished render drops the " ETA <duration>" suffix, which is what left
+// `ETA 12s` ghosting next to the final `100.00%`; every line is therefore padded
+// back to the previous width.
+test "cli: a shorter progress line blanks out the previous, longer one" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+
+    try emitLine(&out.writer, "AAAA", 0); // in progress: carries an ETA
+    try emitLine(&out.writer, "BB", 4); // finished: two characters shorter
+
+    try testing.expectEqualStrings("\rAAAA\rBB  ", out.written());
+}
 
 test "cli: formatBytes matches pb (1024-based)" {
     var buf: [512]u8 = undefined;

@@ -177,6 +177,13 @@ triple `GHES_BASE_URL`/`GHES_UPLOAD_URL`/`GHES_AUTH_TOKEN`.
   abandoned attempt can still be inside the HTTP client, so clients (and the
   stalled attempt's thread, parked in the kernel) live until `bin` exits.
 
+## Versioning
+
+Releases are tagged `vX.Y.Z`, starting at **v1.0.0** — the port matches the
+reference's feature set (marcosnils/bin v0.29.3) plus the fixes listed above, so
+it is no longer a moving `dev` build. `bin -v/--version` prints the version from
+`src/version.zig`; bump that and `.version` in `build.zig.zon` together.
+
 ## License
 
 MIT

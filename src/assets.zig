@@ -248,6 +248,14 @@ pub const Filter = struct {
     /// recursively unpacks until a final executable file is found.
     pub fn processBytes(self: *Filter, allocator: std.mem.Allocator, data: []const u8) !ProcessedFile {
         const t = sniffType(data);
+
+        // A .jar is a zip archive by magic, but it is an executable unit on its
+        // own (java -jar), so it is kept intact instead of being unpacked — the
+        // reference does the same (marcosnils/bin#197).
+        if (t == .zip and std.ascii.eqlIgnoreCase(std.fs.path.extension(self.name), ".jar")) {
+            return .{ .data = data, .name = self.name };
+        }
+
         var out: ?ProcessedFile = null;
         switch (t) {
             .gz => {
@@ -671,12 +679,12 @@ fn selectCandidate(allocator: std.mem.Allocator, matches: []FilteredAsset, all_a
     }
     if (matches.len == 1) return matches[0];
 
-    const generic = try displaySorted(allocator, matches);
-    defer allocator.free(generic);
+    const shown = try shownOptions(allocator, matches, preferred, version);
+    defer allocator.free(shown.items);
 
     var opts = std.ArrayList([]const u8).empty;
     defer opts.deinit(allocator);
-    for (generic) |m| try opts.append(allocator, m.name);
+    for (shown.items) |m| try opts.append(allocator, m.name);
     if (all_assets.len > matches.len) {
         try opts.append(allocator, "Show all");
     }
@@ -684,14 +692,14 @@ fn selectCandidate(allocator: std.mem.Allocator, matches: []FilteredAsset, all_a
     const msg = try std.fmt.allocPrint(allocator, "Showing {d} assets out of {d}. Select an option ", .{ matches.len, all_assets.len });
     defer allocator.free(msg);
 
-    const choice = try options_mod.selectWithDefault(msg, opts.items, defaultIndex(matches, preferred, version));
+    const choice = try options_mod.selectWithDefault(msg, opts.items, shown.default_index);
     if (std.mem.eql(u8, choice, "Show all")) {
-        const all_generic = try displaySorted(allocator, all_assets);
-        defer allocator.free(all_generic);
+        const all_shown = try shownOptions(allocator, all_assets, preferred, version);
+        defer allocator.free(all_shown.items);
         var all_opts = std.ArrayList([]const u8).empty;
         defer all_opts.deinit(allocator);
-        for (all_generic) |m| try all_opts.append(allocator, m.name);
-        const choice2 = try options_mod.selectWithDefault("Select from all available assets:", all_opts.items, defaultIndex(all_assets, preferred, version));
+        for (all_shown.items) |m| try all_opts.append(allocator, m.name);
+        const choice2 = try options_mod.selectWithDefault("Select from all available assets:", all_opts.items, all_shown.default_index);
         for (all_assets) |a| {
             if (std.mem.eql(u8, a.name, choice2)) return a;
         }
@@ -701,6 +709,25 @@ fn selectCandidate(allocator: std.mem.Allocator, matches: []FilteredAsset, all_a
         if (std.mem.eql(u8, m.name, choice)) return m;
     }
     return error.InvalidChoice;
+}
+
+/// The picker's option list, sorted by name exactly as it is displayed, plus the
+/// index of the artefact to offer as the default.
+///
+/// The default index MUST be computed against that same sorted list. Computing
+/// it against the unsorted candidates instead — as this used to — points the
+/// "(default)" marker at whichever artefact happens to land on that position
+/// after sorting, and GitHub returns assets in upload order rather than
+/// alphabetically, so pressing Enter could install an artefact the user never
+/// meant to pick.
+const ShownOptions = struct {
+    items: []FilteredAsset,
+    default_index: ?usize,
+};
+
+fn shownOptions(allocator: std.mem.Allocator, matches: []FilteredAsset, preferred: []const u8, version: []const u8) !ShownOptions {
+    const items = try displaySorted(allocator, matches);
+    return .{ .items = items, .default_index = defaultIndex(items, preferred, version) };
 }
 
 fn defaultIndex(opts: []FilteredAsset, preferred: []const u8, version: []const u8) ?usize {
@@ -962,4 +989,61 @@ test "assets: globMatch handles star and question" {
     try testing.expect(globMatch("gh_*_linux_amd64.tar.gz", "gh_2.40.0_linux_amd64.tar.gz"));
     try testing.expect(globMatch("gh-?.40.0-*", "gh-2.40.0-linux"));
     try testing.expect(!globMatch("gh_*_windows.zip", "gh_2.40.0_linux_amd64.tar.gz"));
+}
+
+// The default index has to be computed against the option list as it is
+// displayed (sorted by name). GitHub returns assets in upload order, so an index
+// into the unsorted candidates points at a different artefact once the list is
+// sorted: pressing Enter on "(default)" then installs an artefact the user never
+// meant to pick, which is how a config ends up pinned to the wrong one.
+test "assets: the picker default points at the preferred artefact in the displayed order" {
+    const allocator = testing.allocator;
+    const version = "4.47";
+
+    // Upload order: the preferred artefact (the one recorded in the config) comes
+    // first here, and lands in the middle of the sorted option list.
+    var matches = [_]FilteredAsset{
+        .{ .repo_name = "seaweedfs/seaweedfs", .name = "windows_amd64.zip", .display_name = "windows_amd64.zip", .url = "https://example.invalid/windows_amd64.zip", .extra_headers = &.{}, .score = 30 },
+        .{ .repo_name = "seaweedfs/seaweedfs", .name = "aaa_windows_amd64.zip", .display_name = "aaa_windows_amd64.zip", .url = "https://example.invalid/aaa_windows_amd64.zip", .extra_headers = &.{}, .score = 30 },
+        .{ .repo_name = "seaweedfs/seaweedfs", .name = "zzz_windows_amd64.zip", .display_name = "zzz_windows_amd64.zip", .url = "https://example.invalid/zzz_windows_amd64.zip", .extra_headers = &.{}, .score = 30 },
+    };
+    const preferred = try sanitizeName(allocator, "windows_amd64.zip", version);
+    defer allocator.free(preferred);
+
+    const shown = try shownOptions(allocator, &matches, preferred, version);
+    defer allocator.free(shown.items);
+
+    try testing.expectEqual(@as(usize, 3), shown.items.len);
+    try testing.expectEqualStrings("aaa_windows_amd64.zip", shown.items[0].name);
+    try testing.expectEqualStrings("windows_amd64.zip", shown.items[1].name);
+
+    // The default must name the preferred artefact — not options[0], which is
+    // what the index computed on the unsorted candidates used to select.
+    const index = shown.default_index orelse return error.MissingDefault;
+    try testing.expect(index < shown.items.len);
+    try testing.expectEqualStrings("windows_amd64.zip", shown.items[index].name);
+
+    // Self-check that this fixture can tell the two behaviours apart: the index
+    // derived from the upload-ordered candidates (the old behaviour) really does
+    // name a different artefact, so the assertion above cannot pass by accident
+    // if the default ever goes back to being computed on them.
+    const unsorted_index = defaultIndex(&matches, preferred, version) orelse return error.MissingDefault;
+    try testing.expectEqual(@as(usize, 0), unsorted_index);
+    try testing.expect(!std.mem.eql(u8, shown.items[unsorted_index].name, "windows_amd64.zip"));
+}
+
+// A .jar is a zip archive by magic, but it is an executable unit on its own
+// (java -jar), so it has to be kept intact rather than unpacked. The reference
+// fixed the same bug (marcosnils/bin#197).
+test "assets: a .jar asset is kept intact instead of unpacked as a zip" {
+    const allocator = testing.allocator;
+    // Sniffs as a zip, but is not a parsable archive: unpacking it would fail.
+    const jar = "PK\x03\x04" ++ "not really an archive";
+    const opts = FilterOpts{};
+    var f = Filter.init(&opts);
+    f.name = "server.JAR";
+
+    const out = try f.processBytes(allocator, jar);
+    try testing.expectEqualStrings(jar, out.data);
+    try testing.expectEqualStrings("server.JAR", out.name);
 }
