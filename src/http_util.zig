@@ -74,10 +74,15 @@ fn getBodyOnce(allocator: std.mem.Allocator, client: *std.http.Client, url: []co
             // Keep-alive (default): the client pools the connection, so a
             // burst of requests to the same host (e.g. update checks across
             // many binaries) reuses the TCP+TLS connection instead of doing
-            // a fresh handshake every time.
+            // a fresh handshake every time. That reuse is also what turns the
+            // peer's own idle-close into a failure here — the std reports
+            // `HttpConnectionClosing` when a pooled connection is already gone —
+            // so a failed request has to take its connection out of the pool:
+            // the retry then runs on a fresh socket instead of the same dead one.
         },
     });
     defer req.deinit();
+    errdefer timeout.dropConnection(&req);
     watch.trackRequest(&req);
     try req.sendBodiless();
 
@@ -116,3 +121,13 @@ pub fn encodePathSegment(allocator: std.mem.Allocator, s: []const u8) ![]const u
     }.valid);
     return allocator.dupe(u8, out.written());
 }
+
+// Note: there is deliberately no end-to-end test for the stale-connection path
+// here. Reproducing it needs a fake HTTP server that answers once and then hangs
+// up on the pooled connection, and the one written for this had the harness
+// itself deadlocking before the behaviour under test could run. The assertions on
+// `retryable` above pin the classification instead, and `dropConnection` is
+// justified by the std's own bookkeeping: `Request.deinit` marks a connection
+// closing only from its reader states, and a request that dies before a response
+// head was parsed leaves that state `.ready`, so the pool would keep a socket the
+// peer had already closed and every retry would reissue on it.

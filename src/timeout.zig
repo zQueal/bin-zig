@@ -243,22 +243,60 @@ fn monitorLoop() void {
 // Bounded retries
 // ---------------------------------------------------------------------------
 
-/// Errors worth another attempt: all of them mean a transfer stopped
-/// mid-flight, as opposed to the server answering the request with a decision.
+/// Errors that are worth another attempt.
+///
+/// Deliberately a *denylist*. The transfer phase fails in connection-level ways
+/// that Zig reports through a wide, version-dependent set of names — a keep-alive
+/// connection the peer has closed surfaces as `HttpConnectionClosing` (or
+/// `HttpRequestTruncated`, or `ReadFailed` wrapped around it), a write into a
+/// closed socket as `BrokenPipe`, a peer reset as `ConnectionResetByPeer`, and so
+/// on. Enumerating the transient ones instead (as this used to) means every name
+/// we miss aborts a whole `bin update` run — `HttpConnectionClosing` did exactly
+/// that — so only errors that mean "the server answered" or "the local
+/// environment refused" are excluded here. Retries stay bounded by `--retries`.
 pub fn retryable(err: anyerror) bool {
     return switch (err) {
-        error.Stalled,
-        error.RequestFailed,
-        error.DownloadFailed,
-        error.ConnectionClosed,
-        error.ConnectionResetByPeer,
-        error.EndOfStream,
-        error.BrokenPipe,
-        error.NetworkSubsystemFailed,
-        error.Unexpected,
-        => true,
-        else => false,
+        // The server answered, or there was nothing to answer with.
+        error.RequestFailed, // non-2xx status
+        error.NoReleases,
+        error.NoCompatibleFiles,
+        error.NoAssetsMatchingPattern,
+        error.NoFile,
+        error.InvalidResponse,
+        error.NoVersion,
+        error.InvalidURL,
+        error.InvalidChoice,
+        // The user or the configuration decided this.
+        error.CommandAborted,
+        error.DryRunExit,
+        error.NotManaged,
+        error.InvalidArgument,
+        error.MissingFlagValue,
+        error.UrlRequired,
+        error.InvalidInput,
+        // Local state that another attempt cannot change.
+        error.FileNotFound,
+        error.AccessDenied,
+        error.IsDir,
+        error.NotDir,
+        error.PathAlreadyExists,
+        error.NameTooLong,
+        error.InvalidUtf8,
+        error.OutOfMemory,
+        => false,
+        else => true,
     };
+}
+
+/// Marks the connection a failed request was using as closing, so the client
+/// destroys it instead of returning it to the pool.
+///
+/// `Request.deinit` only sets that flag from its own reader states, and a request
+/// that dies before a response head is parsed leaves the state `.ready` — the
+/// pool then keeps a socket the peer had already closed, and a retry would reissue
+/// on that same dead socket and fail again.
+pub fn dropConnection(req: *std.http.Client.Request) void {
+    if (req.connection) |connection| connection.closing = true;
 }
 
 fn errorLabel(err: anyerror) []const u8 {

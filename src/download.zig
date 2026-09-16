@@ -577,6 +577,38 @@ test "retries are bounded and limited to transfer failures" {
     try std.testing.expect(!other.shouldRetry(error.NoFile));
 }
 
+// A connection-level failure has to be retried: the std reports a keep-alive
+// connection the peer closed as `HttpConnectionClosing` (std/http.zig:379), and
+// that name not being retryable is what aborted a whole `bin update` run. The
+// classification is deliberately a denylist, so the next name the std uses for
+// the same situation cannot repeat it.
+test "connection-level failures are retried, decisions are not" {
+    // Transient: the peer, the network, or the std's own plumbing got in the way.
+    try std.testing.expect(timeout.retryable(error.HttpConnectionClosing));
+    try std.testing.expect(timeout.retryable(error.HttpRequestTruncated));
+    try std.testing.expect(timeout.retryable(error.ReadFailed));
+    try std.testing.expect(timeout.retryable(error.ConnectionResetByPeer));
+    try std.testing.expect(timeout.retryable(error.ConnectionClosed));
+    try std.testing.expect(timeout.retryable(error.EndOfStream));
+    try std.testing.expect(timeout.retryable(error.BrokenPipe));
+    try std.testing.expect(timeout.retryable(error.WouldBlock));
+    try std.testing.expect(timeout.retryable(error.ConnectionTimedOut));
+    try std.testing.expect(timeout.retryable(error.NetworkSubsystemFailed));
+    try std.testing.expect(timeout.retryable(error.Stalled));
+    try std.testing.expect(timeout.retryable(error.Unexpected)); // wrapped syscall errors
+
+    // Permanent: the server answered, or the local environment said no.
+    try std.testing.expect(!timeout.retryable(error.RequestFailed));
+    try std.testing.expect(!timeout.retryable(error.NoReleases));
+    try std.testing.expect(!timeout.retryable(error.NoFile));
+    try std.testing.expect(!timeout.retryable(error.InvalidURL));
+    try std.testing.expect(!timeout.retryable(error.NotManaged));
+    try std.testing.expect(!timeout.retryable(error.CommandAborted));
+    try std.testing.expect(!timeout.retryable(error.OutOfMemory));
+    try std.testing.expect(!timeout.retryable(error.FileNotFound));
+    try std.testing.expect(!timeout.retryable(error.AccessDenied));
+}
+
 // A peer that completes the TCP handshake and then sends nothing at all is the
 // exact shape of the hang the watchdog exists for: without a deadline the
 // blocking read never returns and `bin` prints nothing forever. This runs on
