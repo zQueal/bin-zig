@@ -166,6 +166,16 @@ triple `GHES_BASE_URL`/`GHES_UPLOAD_URL`/`GHES_AUTH_TOKEN`.
 - `clean` and `info` are zig extensions (not present in the reference).
 - `bzip2`-compressed releases require a `bzip2` binary on PATH (the Zig std
   library dropped bzip2 in 0.15).
+- Transfers have a deadline. The reference blocks on the socket forever when a
+  peer stops sending data mid-transfer (no output, no error); here a transfer
+  that receives nothing for `--timeout <seconds>` (default 30, `0` disables,
+  or `BIN_TIMEOUT`) is retried up to `--retries <n>` extra times (default 2,
+  `BIN_RETRIES`) with a small backoff. Each attempt runs on its own thread and a
+  stalled one is *given up on* rather than waited for, then retried on a fresh
+  connection — which is what makes the retry work on Windows too, where a blocked
+  Winsock receive cannot be woken from another thread. Because of that, an
+  abandoned attempt can still be inside the HTTP client, so clients (and the
+  stalled attempt's thread, parked in the kernel) live until `bin` exits.
 
 ## License
 

@@ -7,9 +7,11 @@ const providers = @import("providers.zig");
 /// Mirrors cmd/ensure.go: verifies each managed binary, re-installing when it
 /// is missing or its SHA-256 hash does not match the stored one.
 pub fn ensure(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.EnvMap, args: []const []const u8) !void {
-    var client = std.http.Client{ .allocator = allocator };
-    try client.ca_bundle.rescan(allocator);
-    defer client.deinit();
+    // Process-lifetime and thread-safe: a stalled attempt can be abandoned while
+    // still inside this client (see timeout.zig), so it is never torn down, and
+    // its allocator must be safe to use from the attempt threads.
+    var client = std.http.Client{ .allocator = std.heap.smp_allocator };
+    try client.ca_bundle.rescan(std.heap.smp_allocator);
 
     var bins_to_process = std.ArrayList(config.Binary).empty;
     defer bins_to_process.deinit(allocator);

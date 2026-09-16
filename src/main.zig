@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("cli.zig");
+const timeout = @import("timeout.zig");
 const config = @import("config.zig");
 const install_cmd = @import("install.zig");
 const list_cmd = @import("list.zig");
@@ -24,6 +25,7 @@ fn errorMessage(err: anyerror) []const u8 {
         error.CommandAborted => "command aborted",
         error.InvalidInput => "invalid input",
         error.DryRunExit => "Updates found, exit (dry-run mode).",
+        error.Stalled => "stalled transfer: no data received from the server",
         else => @errorName(err),
     };
 }
@@ -63,19 +65,40 @@ pub fn main() !void {
 }
 
 fn run(allocator: std.mem.Allocator, env: std.process.EnvMap, args: []const []const u8) !void {
-    // Global --debug flag (cobra persistent flag: may appear anywhere).
+    // Global flags (cobra persistent flags: they may appear anywhere, including
+    // after the command).
     var debug = false;
     var filtered = std.ArrayList([]const u8).empty;
-    for (args) |a| {
+    var global_flags = std.ArrayList([]const u8).empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
         if (std.mem.eql(u8, a, "--debug")) {
             debug = true;
-        } else {
-            try filtered.append(allocator, a);
+            continue;
         }
+        // --timeout / --retries take a value, so that token is consumed here too
+        // and never reaches the command parser; "--flag=value" is a single token.
+        if (std.mem.eql(u8, a, "--timeout") or std.mem.eql(u8, a, "--retries")) {
+            try global_flags.append(allocator, a);
+            if (i + 1 < args.len) {
+                i += 1;
+                try global_flags.append(allocator, args[i]);
+            }
+            continue;
+        }
+        if (std.mem.startsWith(u8, a, "--timeout=") or std.mem.startsWith(u8, a, "--retries=")) {
+            try global_flags.append(allocator, a);
+            continue;
+        }
+        try filtered.append(allocator, a);
     }
     const argv = filtered.items;
     cli.debug_enabled = debug;
     if (debug) std.log.info("debug logs enabled, version: {s}", .{version_string});
+
+    // Transfer deadlines: environment first, then the flags collected above.
+    timeout.configure(env, global_flags.items);
 
     // No arguments defaults to `list` (reference behavior).
     if (argv.len == 0) {
@@ -299,9 +322,11 @@ fn printHelp() void {
         \\  info        Shows API rate limit information (zig extension)
         \\
         \\Flags:
-        \\      --debug     Enable debug mode
-        \\  -h, --help      help for bin
-        \\  -v, --version   version for bin
+        \\      --debug        Enable debug mode
+        \\  -h, --help         help for bin
+        \\      --retries int  Extra attempts for a transfer that fails mid-flight (default 2)
+        \\      --timeout int  Seconds without data before aborting a transfer (default 30, 0 disables)
+        \\  -v, --version      version for bin
         \\
         \\Use "bin [command] --help" for more information about a command.
         \\

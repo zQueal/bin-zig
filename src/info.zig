@@ -12,9 +12,11 @@ const RateLimitInfo = struct {
 
 /// Extra zig command (not in the reference): shows API rate limit info.
 pub fn info(allocator: std.mem.Allocator) !void {
-    var client = std.http.Client{ .allocator = allocator };
-    try client.ca_bundle.rescan(allocator);
-    defer client.deinit();
+    // Process-lifetime and thread-safe: a stalled attempt can be abandoned while
+    // still inside this client (see timeout.zig), so it is never torn down, and
+    // its allocator must be safe to use from the attempt threads.
+    var client = std.http.Client{ .allocator = std.heap.smp_allocator };
+    try client.ca_bundle.rescan(std.heap.smp_allocator);
 
     const github_token = std.process.getEnvVarOwned(allocator, "GITHUB_TOKEN") catch "";
     const gitlab_token = std.process.getEnvVarOwned(allocator, "GITLAB_TOKEN") catch "";

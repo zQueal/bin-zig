@@ -13,9 +13,11 @@ pub const InstallOpts = struct {
 /// Installs the binary at `url` into `resolved_path` (a directory or a file
 /// path), mirroring cmd/install.go of the reference implementation.
 pub fn install(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.EnvMap, url: []const u8, resolved_path: []const u8, opts: InstallOpts) !void {
-    var client = std.http.Client{ .allocator = allocator };
-    try client.ca_bundle.rescan(allocator);
-    defer client.deinit();
+    // Process-lifetime and thread-safe: a stalled attempt can be abandoned while
+    // still inside this client (see timeout.zig), so it is never torn down, and
+    // its allocator must be safe to use from the attempt threads.
+    var client = std.http.Client{ .allocator = std.heap.smp_allocator };
+    try client.ca_bundle.rescan(std.heap.smp_allocator);
 
     var provider = try providers.Provider.new(allocator, url, opts.provider);
     std.log.debug("Using provider '{s}' for '{s}'", .{ provider.getID(), url });

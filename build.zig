@@ -192,6 +192,16 @@ pub fn build(b: *std.Build) void {
     });
     const run_test_assets = b.addRunArtifact(test_assets);
 
+    // Test: Transfer deadlines (stall watchdog + bounded retries)
+    const download_mod = b.createModule(.{
+        .root_source_file = b.path("src/download.zig"),
+        .target = target,
+    });
+    const test_download = b.addTest(.{
+        .root_module = download_mod,
+    });
+    const run_test_download = b.addRunArtifact(test_download);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -203,6 +213,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_test_checksum.step);
     test_step.dependOn(&run_test_cli.step);
     test_step.dependOn(&run_test_assets.step);
+    test_step.dependOn(&run_test_download.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

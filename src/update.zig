@@ -21,9 +21,11 @@ const UpdateInfo = struct {
 
 /// Mirrors cmd/update.go of the reference implementation.
 pub fn update(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.EnvMap, args: []const []const u8, opts: UpdateOpts) !void {
-    var client = std.http.Client{ .allocator = allocator };
-    try client.ca_bundle.rescan(allocator);
-    defer client.deinit();
+    // Process-lifetime and thread-safe: a stalled attempt can be abandoned while
+    // still inside this client (see timeout.zig), so it is never torn down, and
+    // its allocator must be safe to use from the attempt threads.
+    var client = std.http.Client{ .allocator = std.heap.smp_allocator };
+    try client.ca_bundle.rescan(std.heap.smp_allocator);
 
     // Resolve which binaries to process.
     var bins_to_process = std.StringHashMap(config.Binary).init(allocator);
@@ -233,7 +235,8 @@ fn checkWorker(ctx: *CheckCtx) void {
     // keep-alive reuse across the requests that worker performs.
     var client = std.http.Client{ .allocator = ctx.allocator };
     client.ca_bundle.rescan(ctx.allocator) catch return;
-    defer client.deinit();
+    // Not deinit'ed: an abandoned attempt (see timeout.zig) can still be inside
+    // this client. `ctx.allocator` is already the thread-safe smp allocator.
 
     while (true) {
         const i = ctx.next.fetchAdd(1, .monotonic);
