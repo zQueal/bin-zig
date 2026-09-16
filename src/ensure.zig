@@ -18,7 +18,16 @@ pub fn ensure(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
 
     if (args.len > 0) {
         for (args) |a| {
-            const bin = try config.getBinPath(allocator, conf, env, a);
+            // A name that resolves to nothing (not in PATH, not a managed path)
+            // is not managed by bin: say so, instead of surfacing the bare
+            // error.FileNotFound that lookPath reports for it.
+            const bin = config.getBinPath(allocator, conf, env, a) catch |err| switch (err) {
+                error.FileNotFound, error.BinPathNotFound => {
+                    std.log.err("binary {s} is not managed by bin", .{a});
+                    return error.NotManaged;
+                },
+                else => return err,
+            };
             const b = conf.bins.get(bin) orelse {
                 std.log.err("binary {s} is not managed by bin", .{bin});
                 return error.NotManaged;
