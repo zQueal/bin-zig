@@ -6,4 +6,4 @@
 //! "dev" build. Keep this string and `.version` in build.zig.zon in sync when
 //! releasing.
 
-pub const string = "1.0.2";
+pub const string = "1.0.3";

@@ -181,7 +181,13 @@ fn writeStderrRaw(bytes: []const u8) void {
 // ---------------------------------------------------------------------------
 
 const bar_refresh_ns = 200 * std.time.ns_per_ms;
+/// Line width used when the terminal size cannot be read (pb falls back to 100
+/// for the same reason).
 const bar_default_width = 100;
+/// Room the bar keeps for itself even on a terminal too narrow for the rest.
+const bar_min_width = 10;
+/// Cap for the line, so a very wide terminal cannot outgrow the render buffer.
+const bar_max_width = 200;
 
 pub const ProgressBar = struct {
     total: u64,
@@ -225,7 +231,10 @@ pub const ProgressBar = struct {
     fn writeLine(self: *ProgressBar, current: u64, finished: bool) void {
         var buf: [512]u8 = undefined;
         const elapsed_s = @as(f64, @floatFromInt(std.time.nanoTimestamp() - self.started)) / @as(f64, std.time.ns_per_s);
-        const line = renderLine(&buf, self.total, current, finished, elapsed_s);
+        // Asked per render rather than once, so a terminal resized mid-download
+        // is picked up.
+        const width = @min(terminalWidth() orelse bar_default_width, bar_max_width);
+        const line = renderLine(&buf, self.total, current, finished, elapsed_s, width);
         const file = std.fs.File.stderr();
         var out_buf: [1]u8 = undefined;
         var w2 = file.writer(&out_buf);
@@ -233,6 +242,24 @@ pub const ProgressBar = struct {
         self.last_len = line.len;
     }
 };
+
+/// Width of the terminal the bar is drawn on, or null when there is none to ask
+/// (a pipe, a file, a test). Mirrors std.Progress's detection.
+fn terminalWidth() ?usize {
+    const builtin = @import("builtin");
+    const handle = std.fs.File.stderr().handle;
+    if (builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+        var info: windows.CONSOLE_SCREEN_BUFFER_INFO = undefined;
+        if (windows.kernel32.GetConsoleScreenBufferInfo(handle, &info) == windows.FALSE) return null;
+        if (info.dwSize.X <= 0) return null;
+        return @intCast(info.dwSize.X);
+    }
+    var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+    const err = std.posix.system.ioctl(handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
+    if (std.posix.errno(err) != .SUCCESS or winsize.col == 0) return null;
+    return @intCast(winsize.col);
+}
 
 /// Writes one progress line over the previous one.
 ///
@@ -251,7 +278,12 @@ fn emitLine(w: *std.Io.Writer, line: []const u8, previous_len: usize) !void {
 }
 
 /// Builds one progress bar line: "{counters} {bar} {percent} {speed} ETA {dur}".
-fn renderLine(buf: *[512]u8, total: u64, current: u64, finished: bool, elapsed_s: f64) []const u8 {
+///
+/// `width` is the room the line has — the terminal's width. The counters and the
+/// trailing fields are rendered first and the bar takes whatever is left, so the
+/// line fits the terminal instead of wrapping and leaving the `\r` redraw on the
+/// wrong row.
+fn renderLine(buf: *[512]u8, total: u64, current: u64, finished: bool, elapsed_s: f64, width: usize) []const u8 {
     var fbs = std.io.fixedBufferStream(buf);
     const w = fbs.writer();
 
@@ -264,10 +296,38 @@ fn renderLine(buf: *[512]u8, total: u64, current: u64, finished: bool, elapsed_s
 
     // counters
     w.print("{s} / {s} ", .{ formatBytes(&s1, current), formatBytes(&s2, total) }) catch return buf[0..0];
+    const counters_len = fbs.pos;
 
-    // bar: [----->____] with adaptive width
-    var width_left: usize = bar_default_width;
-    width_left -= 2; // "[", "]"
+    // Trailing fields, rendered into their own buffer because their length varies
+    // with the numbers and the bar only gets what `width` leaves after them.
+    var tail_buf: [96]u8 = undefined;
+    var tail_fbs = std.io.fixedBufferStream(&tail_buf);
+    const tw = tail_fbs.writer();
+
+    // percent
+    if (total > 0) {
+        const pct = @as(f64, @floatFromInt(current)) / @as(f64, @floatFromInt(total)) * 100.0;
+        tw.print("{d:0>2}.{d:0>2}% ", .{ @as(u64, @intFromFloat(@floor(pct))), @as(u64, @intFromFloat(@floor(pct * 100))) % 100 }) catch return buf[0..0];
+    } else {
+        tw.writeAll("?% ") catch return buf[0..0];
+    }
+
+    // speed + ETA
+    if (elapsed_s > 0 and current > 0) {
+        const speed = @as(f64, @floatFromInt(current)) / elapsed_s;
+        tw.print("{s}/s ", .{formatBytes(&s3, @intFromFloat(speed))}) catch return buf[0..0];
+        if (!finished and total > current) {
+            const remain = @as(f64, @floatFromInt(total - current)) / speed;
+            tw.print("ETA {s}", .{durationString(&s4, remain)}) catch return buf[0..0];
+        }
+    } else {
+        tw.writeAll("0 B/s") catch return buf[0..0];
+    }
+    const tail = tail_fbs.getWritten();
+
+    // bar: [----->____], sized to the room the counters and the tail leave
+    const chrome = counters_len + 3 + tail.len; // "[", "]", and the space after "]"
+    const width_left: usize = if (width > chrome + bar_min_width) width - chrome else bar_min_width;
     var cur_count: usize = 0;
     if (total > 0) {
         const frac = @as(f128, @floatFromInt(current)) / @as(f128, @floatFromInt(total));
@@ -293,25 +353,7 @@ fn renderLine(buf: *[512]u8, total: u64, current: u64, finished: bool, elapsed_s
     }
     w.writeAll("] ") catch return buf[0..0];
 
-    // percent
-    if (total > 0) {
-        const pct = @as(f64, @floatFromInt(current)) / @as(f64, @floatFromInt(total)) * 100.0;
-        w.print("{d:0>2}.{d:0>2}% ", .{ @as(u64, @intFromFloat(@floor(pct))), @as(u64, @intFromFloat(@floor(pct * 100))) % 100 }) catch return buf[0..0];
-    } else {
-        w.writeAll("?% ") catch return buf[0..0];
-    }
-
-    // speed + ETA
-    if (elapsed_s > 0 and current > 0) {
-        const speed = @as(f64, @floatFromInt(current)) / elapsed_s;
-        w.print("{s}/s ", .{formatBytes(&s3, @intFromFloat(speed))}) catch return buf[0..0];
-        if (!finished and total > current) {
-            const remain = @as(f64, @floatFromInt(total - current)) / speed;
-            w.print("ETA {s}", .{durationString(&s4, remain)}) catch return buf[0..0];
-        }
-    } else {
-        w.writeAll("0 B/s") catch return buf[0..0];
-    }
+    w.writeAll(tail) catch return buf[0..0];
 
     return fbs.getWritten();
 }
@@ -410,8 +452,33 @@ test "cli: progress bar line matches pb.Full format" {
     var buf: [512]u8 = undefined;
     const total = 10 * 1024 * 1024;
     const current = 2 * 1024 * 1024;
-    const line = renderLine(&buf, total, current, false, 1.0);
+    const line = renderLine(&buf, total, current, false, 1.0, bar_default_width);
     try testing.expect(std.mem.startsWith(u8, line, "2.00 MiB / 10.00 MiB ["));
     try testing.expect(std.mem.indexOf(u8, line, "] 20.00% ") != null);
     try testing.expect(std.mem.endsWith(u8, line, "ETA 4s"));
+}
+
+// The line has to fit the terminal it is drawn on. With a fixed-width bar it was
+// wider than most terminals, so the terminal wrapped it and the carriage-return
+// redraw that follows landed on the wrong row.
+test "cli: the progress line fits the width it is given" {
+    var buf: [512]u8 = undefined;
+    const total = 10 * 1024 * 1024;
+
+    // Wide: the bar takes the extra room.
+    const wide = renderLine(&buf, total, total, false, 1.0, 200);
+    try testing.expect(wide.len <= 200);
+    try testing.expect(std.mem.indexOf(u8, wide, "100.00% 10.00 MiB/s") != null);
+
+    // Narrow: the counters and the ETA are kept, the bar yields the room.
+    const narrow = renderLine(&buf, total, total / 2, false, 1.0, 60);
+    try testing.expect(narrow.len <= 60);
+    try testing.expect(std.mem.startsWith(u8, narrow, "5.00 MiB / 10.00 MiB ["));
+    try testing.expect(std.mem.endsWith(u8, narrow, "ETA 1s"));
+    try testing.expect(std.mem.indexOf(u8, narrow, ">") != null);
+
+    // Even an absurdly narrow terminal renders a usable bar instead of nothing.
+    const tiny = renderLine(&buf, total, total / 2, false, 1.0, 12);
+    try testing.expect(tiny.len > 0);
+    try testing.expect(std.mem.indexOf(u8, tiny, "[") != null);
 }
