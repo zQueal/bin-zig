@@ -309,6 +309,7 @@ pub const Filter = struct {
             };
             total += n;
         }
+        self.name = decompressedName(self.name);
         return .{ .data = try out.toOwnedSlice(), .name = self.name };
     }
 
@@ -318,6 +319,7 @@ pub const Filter = struct {
         var decompressor = try std.compress.xz.decompress(allocator, old);
         defer decompressor.deinit();
         const out = try decompressor.reader().readAllAlloc(allocator, max_processed_bytes);
+        self.name = decompressedName(self.name);
         return .{ .data = out, .name = self.name };
     }
 
@@ -345,7 +347,18 @@ pub const Filter = struct {
             std.log.err("bzip2 decompression failed: {s}", .{result.stderr});
             return error.Bzip2Failed;
         }
+        self.name = decompressedName(self.name);
         return .{ .data = try allocator.dupe(u8, result.stdout), .name = self.name };
+    }
+
+    /// Names a bare compressed binary after the asset it came from, dropping
+    /// the compression extension: bzip2 and xz streams carry no file name at
+    /// all, and releases gzip streams without a header name, so "restic.xz"
+    /// decompresses to "restic" rather than being installed as "restic.xz"
+    /// (marcosnils/bin#160, fixed upstream by #308). Archives are unaffected —
+    /// processTar/processZip name the extracted file from the entry itself.
+    fn decompressedName(name: []const u8) []const u8 {
+        return std.fs.path.stem(name);
     }
 
     fn processTar(self: *Filter, allocator: std.mem.Allocator, data: []const u8) !ProcessedFile {
@@ -1046,4 +1059,62 @@ test "assets: a .jar asset is kept intact instead of unpacked as a zip" {
     const out = try f.processBytes(allocator, jar);
     try testing.expectEqualStrings(jar, out.data);
     try testing.expectEqualStrings("server.JAR", out.name);
+}
+
+// A bare compressed binary — an asset that is nothing but a compressed
+// executable, rather than an archive — is named after the asset with the
+// compression extension dropped. bzip2 and xz streams carry no file name at
+// all, and releases gzip streams without a header name, so the asset name is
+// the only source; without this, `bin install .../restic.xz` lands in the bin
+// directory as "restic.xz" instead of "restic" (marcosnils/bin#160, fixed
+// upstream by #308 — behaviour our port was missing).
+//
+// The three payloads below are the bytes of "restic binary", compressed with
+// gzip (written without a header name), xz and bzip2 respectively.
+
+const restic_gz = [_]u8{ 31, 139, 8, 0, 0, 0, 0, 0, 2, 10, 43, 74, 45, 46, 201, 76, 86, 72, 202, 204, 75, 44, 170, 4, 0, 216, 100, 116, 235, 13, 0, 0, 0 };
+const restic_xz = [_]u8{ 253, 55, 122, 88, 90, 0, 0, 4, 230, 214, 180, 70, 2, 0, 33, 1, 22, 0, 0, 0, 116, 47, 229, 163, 1, 0, 12, 114, 101, 115, 116, 105, 99, 32, 98, 105, 110, 97, 114, 121, 0, 0, 0, 0, 66, 239, 118, 192, 237, 71, 78, 43, 0, 1, 37, 13, 113, 25, 196, 182, 31, 182, 243, 125, 1, 0, 0, 0, 0, 4, 89, 90 };
+const restic_bz2 = [_]u8{ 66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 24, 11, 14, 155, 0, 0, 4, 17, 128, 64, 0, 58, 33, 28, 32, 32, 0, 49, 0, 211, 77, 4, 13, 13, 52, 12, 156, 40, 142, 213, 199, 197, 220, 145, 78, 20, 36, 6, 2, 195, 166, 192 };
+
+fn expectBareCompressedName(asset: []const u8, data: []const u8) !void {
+    const allocator = testing.allocator;
+    const opts = FilterOpts{};
+    var f = Filter.init(&opts);
+    f.name = asset;
+
+    const out = try f.processBytes(allocator, data);
+    defer allocator.free(out.data);
+
+    // The name is asserted before sanitization: sanitizeName is
+    // platform-scoped (see the test above), so only a Linux host would reduce
+    // this to "restic".
+    try testing.expectEqualStrings("restic_0.15.1_linux_amd64", out.name);
+    try testing.expectEqualStrings("restic binary", out.data);
+}
+
+test "assets: a bare .gz binary is named after the asset" {
+    try expectBareCompressedName("restic_0.15.1_linux_amd64.gz", &restic_gz);
+}
+
+test "assets: a bare .xz binary is named after the asset" {
+    try expectBareCompressedName("restic_0.15.1_linux_amd64.xz", &restic_xz);
+}
+
+test "assets: a bare .bz2 binary is named after the asset" {
+    // bzip2 is a shell-out here (std.compress has no bzip2 in 0.15.2), so this
+    // case is skipped where no bzip2 binary can be run.
+    if (!bzip2Available()) return error.SkipZigTest;
+    try expectBareCompressedName("restic_0.15.1_linux_amd64.bz2", &restic_bz2);
+}
+
+fn bzip2Available() bool {
+    const result = std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{ "bzip2", "--version" },
+    }) catch return false;
+    testing.allocator.free(result.stdout);
+    testing.allocator.free(result.stderr);
+    // Anything that actually ran counts, including an applet that rejects the
+    // flag (BusyBox exits non-zero for --version).
+    return result.term == .Exited;
 }

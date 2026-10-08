@@ -273,6 +273,7 @@ fn cmdInstall(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
 fn cmdUpdate(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.EnvMap, args: []const []const u8) !void {
     var opts = update_cmd.UpdateOpts{};
     var names = std.ArrayList([]const u8).empty;
+    var exclude = std.ArrayList([]const u8).empty;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -287,10 +288,16 @@ fn cmdUpdate(allocator: std.mem.Allocator, conf: *config.Config, env: std.proces
             opts.skip_path_check = true;
         } else if (std.mem.eql(u8, a, "-c") or std.mem.eql(u8, a, "--continue-on-error")) {
             opts.continue_on_error = true;
+        } else if (std.mem.eql(u8, a, "-x") or std.mem.eql(u8, a, "--exclude")) {
+            // Repeatable, like the reference's StringSlice flag.
+            i += 1;
+            if (i >= args.len) return error.MissingFlagValue;
+            try exclude.append(allocator, args[i]);
         } else {
             try names.append(allocator, a);
         }
     }
+    opts.exclude = exclude.items;
     return update_cmd.update(allocator, conf, env, names.items, opts);
 }
 
@@ -397,6 +404,7 @@ fn printCommandHelp(command: []const u8) void {
             \\  -a, --all                 Show all possible download options (skip scoring & filtering)
             \\  -c, --continue-on-error   Continues to update next package if an error is encountered
             \\      --dry-run             Only show status, don't prompt for update
+            \\  -x, --exclude strings     Exclude binaries from the update (can be repeated)
             \\  -h, --help                help for update
             \\  -p, --skip-path-check     Skips path checking when looking into packages
             \\  -y, --yes                 Assume yes to update prompt

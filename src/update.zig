@@ -12,6 +12,9 @@ pub const UpdateOpts = struct {
     all: bool = false,
     skip_path_check: bool = false,
     continue_on_error: bool = false,
+    /// Binaries to leave alone, as names or managed paths (repeatable, like the
+    /// reference's --exclude/-x StringSlice flag).
+    exclude: []const []const u8 = &.{},
 };
 
 const UpdateInfo = struct {
@@ -35,15 +38,9 @@ pub fn update(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
 
     if (args.len > 0) {
         for (args) |a| {
-            // A name that resolves to nothing (not in PATH, not a managed path)
-            // is not managed by bin: say so, instead of surfacing the bare
-            // error.FileNotFound that lookPath reports for it.
-            const bin = config.getBinPath(allocator, conf, env, a) catch |err| switch (err) {
-                error.FileNotFound, error.BinPathNotFound => {
-                    std.log.err("binary {s} is not managed by bin", .{a});
-                    return error.NotManaged;
-                },
-                else => return err,
+            const bin = resolveManagedPath(allocator, conf, env, a) catch |err| {
+                if (err == error.NotManaged) std.log.err("binary {s} is not managed by bin", .{a});
+                return err;
             };
             const b = conf.bins.get(bin) orelse {
                 std.log.err("binary {s} is not managed by bin", .{bin});
@@ -60,9 +57,18 @@ pub fn update(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
         }
     }
 
-    // Excluded binaries (matching the reference binary: no --exclude flag).
+    // Excluded binaries (--exclude/-x): each value resolves to a config key
+    // exactly like a positional argument does, and the entry is then skipped
+    // with the reference's log line.
     var excluded = std.StringHashMap(void).init(allocator);
     defer excluded.deinit();
+    for (opts.exclude) |e| {
+        const key = resolveManagedPath(allocator, conf, env, e) catch |err| {
+            if (err == error.NotManaged) std.log.err("binary {s} is not managed by bin", .{e});
+            return err;
+        };
+        try excluded.put(key, {});
+    }
 
     var to_update = std.ArrayList(struct { info: UpdateInfo, bin: config.Binary, path: []const u8 }).empty;
     defer to_update.deinit(allocator);
@@ -153,14 +159,7 @@ pub fn update(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
         };
         std.log.debug("Using provider '{s}' for '{s}'", .{ provider.getID(), ui.url });
 
-        const p_result = provider.fetch(allocator, &client, .{
-            .all = opts.all,
-            .package_name = b.remote_name,
-            .package_path = b.package_path,
-            .skip_path_check = opts.skip_path_check,
-            .previous_asset = b.selected_asset,
-            .previous_version = b.version,
-        }) catch |err| {
+        const p_result = provider.fetch(allocator, &client, fetchOptsFor(opts, b)) catch |err| {
             if (opts.continue_on_error) {
                 try update_failures.append(allocator, try std.fmt.allocPrint(allocator, "Error while fetching {s}: {s}", .{ ui.url, @errorName(err) }));
                 continue;
@@ -189,6 +188,38 @@ pub fn update(allocator: std.mem.Allocator, conf: *config.Config, env: std.proce
     }
 
     for (update_failures.items) |f| std.log.warn("{s}", .{f});
+}
+
+/// Resolves a positional argument or an --exclude value to the config key it
+/// names. A value that is neither in PATH nor managed by bin comes back as
+/// error.NotManaged, instead of the bare error.FileNotFound that lookPath
+/// reports for it.
+///
+/// Deliberately log-free: the test runner counts every err-level log as a test
+/// failure, so the user-facing message belongs to the call sites.
+fn resolveManagedPath(allocator: std.mem.Allocator, conf: *config.Config, env: std.process.EnvMap, arg: []const u8) ![]const u8 {
+    return config.getBinPath(allocator, conf, env, arg) catch |err| switch (err) {
+        error.FileNotFound, error.BinPathNotFound => return error.NotManaged,
+        else => return err,
+    };
+}
+
+/// Fetch options for updating `b`. AutoSelectPrevious mirrors the reference
+/// (marcosnils/bin#312): outside --all, the artefact picked on the previous
+/// install/upgrade is re-selected without prompting, exactly as `ensure`
+/// already does. Without it `update` always shows the candidate menu — the
+/// "Showing N assets out of M. Select an option" prompt — even when the
+/// stored selection is unambiguous.
+pub fn fetchOptsFor(opts: UpdateOpts, b: config.Binary) providers.FetchOpts {
+    return .{
+        .all = opts.all,
+        .package_name = b.remote_name,
+        .package_path = b.package_path,
+        .skip_path_check = opts.skip_path_check,
+        .previous_asset = b.selected_asset,
+        .previous_version = b.version,
+        .auto_select_previous = !opts.all,
+    };
 }
 
 /// Mirrors cmd/getLatestVersion: no update when versions are equal or when the
@@ -270,4 +301,88 @@ fn checkWorker(ctx: *CheckCtx) void {
         defer ctx.mutex.unlock();
         ctx.results.append(ctx.allocator, result) catch {};
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "update: fetchOptsFor re-selects the previous artefact unless --all" {
+    const b = config.Binary{
+        .path = "/home/u/.local/bin/tool",
+        .remote_name = "tool",
+        .version = "v1.0.0",
+        .hash = "abc123",
+        .url = "https://github.com/x/tool",
+        .provider = "github",
+        .package_path = "bin/tool",
+        .selected_asset = "tool_1.0.0_linux_amd64.tar.gz",
+    };
+
+    // Default: the artefact chosen on the previous install is re-selected
+    // without prompting (marcosnils/bin#312 — `ensure` always did this,
+    // `update` did not, so it always showed the candidate menu).
+    const o = fetchOptsFor(.{}, b);
+    try std.testing.expect(o.auto_select_previous);
+    try std.testing.expect(!o.all);
+    try std.testing.expectEqualStrings(b.selected_asset, o.previous_asset);
+    try std.testing.expectEqualStrings(b.version, o.previous_version);
+    try std.testing.expectEqualStrings(b.remote_name, o.package_name);
+    try std.testing.expectEqualStrings(b.package_path, o.package_path);
+
+    // --all asks for every candidate, so nothing is auto-selected.
+    const all = fetchOptsFor(.{ .all = true }, b);
+    try std.testing.expect(all.all);
+    try std.testing.expect(!all.auto_select_previous);
+}
+
+test "update: --exclude resolves names to config keys and rejects unmanaged ones" {
+    const allocator = std.testing.allocator;
+    var conf = config.Config.init(allocator);
+    defer conf.deinit();
+    try conf.bins.put("/home/u/.local/bin/tool", .{
+        .path = "/home/u/.local/bin/tool",
+        .remote_name = "tool",
+        .version = "v1.0.0",
+        .url = "https://github.com/x/tool",
+        .provider = "github",
+    });
+
+    // An empty environment keeps the PATH lookup from finding anything, so the
+    // name resolves through the managed-binary fallback.
+    var env = std.process.EnvMap.init(allocator);
+    defer env.deinit();
+
+    const resolved = try resolveManagedPath(allocator, &conf, env, "tool");
+    defer allocator.free(resolved);
+    try std.testing.expectEqualStrings("/home/u/.local/bin/tool", resolved);
+
+    // A value bin does not manage is an error, not a silent no-op.
+    try std.testing.expectError(error.NotManaged, resolveManagedPath(allocator, &conf, env, "not-managed"));
+}
+
+test "update: an excluded binary is never version-checked" {
+    // update() keeps scratch allocations for its whole lifetime (the caller
+    // passes an arena), so the test uses one too.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var conf = config.Config.init(allocator);
+    defer conf.deinit();
+    try conf.bins.put("/home/u/.local/bin/tool", .{
+        .path = "/home/u/.local/bin/tool",
+        .remote_name = "tool",
+        .version = "v1.0.0",
+        // Unresolvable on purpose: if --exclude ever stops skipping this entry
+        // the version check runs, fails on the host name, and the test fails.
+        .url = "https://invalid.invalid/x/tool",
+        .provider = "github",
+    });
+
+    var env = std.process.EnvMap.init(allocator);
+    defer env.deinit();
+
+    // The only managed binary is excluded, so nothing is checked at all.
+    try update(allocator, &conf, env, &.{}, .{ .exclude = &.{"tool"} });
 }

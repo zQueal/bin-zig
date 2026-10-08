@@ -1,7 +1,7 @@
 # bin-zig - Effortless Binary Manager (Zig port)
 
 A lightweight, cross-platform binary manager written in Zig — a port of
-[marcosnils/bin](https://github.com/marcosnils/bin). It mirrors the references functionality:
+[marcosnils/bin](https://github.com/marcosnils/bin). It mirrors the reference's functionality:
 the same commands, flags, JSON config format and providers, built with zero
 runtime dependencies and Zig 0.15.2.
 
@@ -21,7 +21,8 @@ zig build -Dtarget=x86_64-linux
 zig build -Dtarget=aarch64-linux
 ```
 
-`zig build test` runs the unit test suite (config, providers, assets, checksum).
+`zig build test` runs the unit test suite (config, providers, checksum, cli,
+assets, download, github, install, update).
 
 On Windows you can also use `just install-zig` to fetch Zig 0.15.2 and
 `just build`.
@@ -44,9 +45,11 @@ Commands:
   info      Shows API rate limit information (zig extension)
 
 Flags:
-      --debug   Enable debug mode
-  -h, --help    help for bin
-  -v, --version version for bin
+      --debug        Enable debug mode
+  -h, --help         help for bin
+      --retries int  Extra attempts for a transfer that fails mid-flight (default 2)
+      --timeout int  Seconds without data before aborting a transfer (default 30, 0 disables)
+  -v, --version      version for bin
 ```
 
 Running `bin` with no arguments lists the managed binaries. Aliases match the
@@ -65,6 +68,11 @@ bin install <url> [name | path] [-f] [-a] [-p provider] [-n pattern]
   hashicorp, helm, goinstall, docker)
 - `-n, --name` glob pattern selecting a specific asset (use `asset/file` to
   select inside archives)
+
+A bare compressed binary — an asset that is only a `.gz`, `.xz` or `.bz2`
+executable rather than an archive — is installed under the asset name with the
+compression extension dropped, so `bin install …/restic.xz` lands as `restic`.
+Files extracted from an archive keep the name they have inside it.
 
 The second argument is a file name (joined with the default download path) or
 a path. Supported URL forms:
@@ -88,12 +96,26 @@ Specific versions can be pinned with an `@tag` suffix
 ### update
 
 ```
-bin update [binary_path...] [--dry-run] [-y] [-a] [-p] [-c] [-x pattern...]
+bin update [binary_path...] [--dry-run] [-y] [-a] [-p] [-c] [-x binary...]
 ```
 
 Checks for newer versions (semver-aware), asks for confirmation, then
 re-installs. `--dry-run` exits with code 3 when updates are found, `-y` skips
-the prompt, `-c` continues on error, `-x` excludes binaries.
+the prompt, `-c` continues on error, `-a` shows every download option instead
+of scoring, and `-p` skips path checking inside packages.
+
+`-x, --exclude <binary>` (repeatable) leaves a binary alone. The value is a
+name in `PATH` or a managed path, exactly like a positional argument; a value
+that `bin` does not manage is an error rather than a silent no-op.
+
+Unless `-a` is given, the artefact chosen on the previous install or upgrade is
+re-selected automatically when exactly one candidate matches, so a normal
+`bin update` does not ask which asset to take — `ensure` has always worked this
+way.
+
+Updating a binary that is currently running works: the file being replaced is
+moved aside to `.{name}.old` next to it, and a later update reclaims it,
+instead of failing with `Access is denied`.
 
 ### Other commands
 
@@ -104,6 +126,10 @@ the prompt, `-c` continues on error, `-x` excludes binaries.
 - `bin prune [-f]` removes config entries for binaries missing from disk
   (asks for confirmation unless `-f`).
 - `bin remove <name|path...>` removes the binary and its config entry.
+- `bin clean` clears the download cache (the `cache` directory next to the
+  configured download path) — a zig extension.
+- `bin info` prints the GitHub, GitLab and Codeberg API rate limits, using the
+  usual auth tokens — a zig extension.
 
 ## Configuration
 
@@ -163,6 +189,13 @@ triple `GHES_BASE_URL`/`GHES_UPLOAD_URL`/`GHES_AUTH_TOKEN`.
 - The update bug fixed here (never upstreamed): `user/repo@tag` URLs no longer
   break `bin update` — the tag is split from the repo with the *last* `@`, and
   short/domain/full URL forms all round-trip correctly.
+- Updating a binary that is still running (never upstreamed): the file being
+  replaced is moved to `.{name}.old` first, and Windows refuses to rename onto
+  that sibling while it is still the running image — so a second `bin update`
+  died with `Access is denied`. That is a sharing violation rather than a
+  permission one, which is why running from an elevated shell never helped. A
+  `.old` that cannot be removed is now stepped over as `.{name}.old.<n>` and
+  reclaimed by a later update; the reference aborts in that situation.
 - `clean` and `info` are zig extensions (not present in the reference).
 - `bzip2`-compressed releases require a `bzip2` binary on PATH (the Zig std
   library dropped bzip2 in 0.15).
@@ -180,8 +213,9 @@ triple `GHES_BASE_URL`/`GHES_UPLOAD_URL`/`GHES_AUTH_TOKEN`.
 ## Versioning
 
 Releases are tagged `vX.Y.Z`, starting at **v1.0.0** — the port matches the
-reference's feature set (marcosnils/bin v0.29.3) plus the fixes listed above, so
-it is no longer a moving `dev` build. `bin -v/--version` prints the version from
+reference's feature set (marcosnils/bin v0.29.3, plus the v0.29.4 install and
+update fixes #312 and #313) and the fixes listed above, so it is no longer a
+moving `dev` build. `bin -v/--version` prints the version from
 `src/version.zig`; bump that and `.version` in `build.zig.zon` together.
 
 ## License
